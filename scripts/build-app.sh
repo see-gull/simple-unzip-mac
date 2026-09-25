@@ -20,7 +20,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME="Simple Unzip"
 # Change this to your own reverse-DNS identifier before publishing.
 BUNDLE_ID="app.simpleunzip.mac"
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 SOURCE_DIR="$ROOT/source/src"
 ENGINE_BIN="$ROOT/build/bin/7zz"

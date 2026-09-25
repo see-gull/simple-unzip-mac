@@ -341,6 +341,56 @@ func registerCommandSuite() {
         expectEqual(ArchiveEngine.commonAncestor(of: urls).path, "/tmp/x/one")
     }
 
+    harness.test("名字互为前缀的兄弟目录不会退化成其中一个") {
+        // `/x/abc`.hasPrefix("/x/ab") is true, which used to stop the walk one
+        // level too deep and hand `7zz` a path it could not find.
+        let urls = [
+            URL(fileURLWithPath: "/tmp/x/ab/f1.txt"),
+            URL(fileURLWithPath: "/tmp/x/abc/f2.txt"),
+        ]
+        expectEqual(ArchiveEngine.commonAncestor(of: urls).path, "/tmp/x")
+
+        let ab = URL(fileURLWithPath: "/tmp/x/ab")
+        expectTrue(ArchiveEngine.isContained(ab, in: ab), "目录应包含自身")
+        expectTrue(
+            ArchiveEngine.isContained(URL(fileURLWithPath: "/tmp/x/ab/sub"), in: ab),
+            "子目录应被判定为包含"
+        )
+        expectFalse(
+            ArchiveEngine.isContained(URL(fileURLWithPath: "/tmp/x/abc"), in: ab),
+            "同名前缀的兄弟目录不应被判定为包含"
+        )
+    }
+
+    harness.test("退出码 1：只读命令宽容，写文件命令报警告") {
+        let parser = ArchiveOutputParser()
+        parser.feed("WARNING: Cannot open 1 file\n")
+        parser.finish()
+
+        expectNil(
+            ArchiveEngine.failure(exitCode: 1, parser: parser),
+            "浏览压缩包不应因警告整体失败"
+        )
+        expectNil(
+            ArchiveEngine.failure(exitCode: 0, parser: parser, warningsAreFailures: true),
+            "退出码 0 永远算成功"
+        )
+
+        guard let warning = ArchiveEngine.failure(
+            exitCode: 1,
+            parser: parser,
+            warningsAreFailures: true
+        ) else {
+            fail("写文件时退出码 1 必须报为警告，否则会静默丢文件")
+            return
+        }
+        guard case .completedWithWarnings(let messages) = warning else {
+            fail("期望 .completedWithWarnings，实际 \(warning)")
+            return
+        }
+        expectFalse(messages.isEmpty, "警告必须带上 7zz 的原始说明")
+    }
+
     harness.test("macOS 垃圾文件排除开关") {
         expectTrue(ArchiveEngine.macJunkExclusions(enabled: true).contains("-xr!.DS_Store"))
         expectTrue(ArchiveEngine.macJunkExclusions(enabled: false).isEmpty)

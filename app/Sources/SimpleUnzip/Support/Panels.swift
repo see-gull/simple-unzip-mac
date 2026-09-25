@@ -112,20 +112,50 @@ enum Panels {
         let group = DispatchGroup()
 
         for provider in providers {
-            guard provider.canLoadObject(ofClass: URL.self) else { continue }
-            group.enter()
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url {
-                    lock.lock()
-                    collected.append(url)
-                    lock.unlock()
+            if provider.canLoadObject(ofClass: URL.self) {
+                group.enter()
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url {
+                        lock.lock()
+                        collected.append(url)
+                        lock.unlock()
+                    }
+                    group.leave()
                 }
-                group.leave()
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                // Some sources (mail attachments, browser downloads) only offer
+                // the raw `public.file-url` payload instead of a loadable URL.
+                group.enter()
+                provider.loadItem(
+                    forTypeIdentifier: UTType.fileURL.identifier,
+                    options: nil
+                ) { item, _ in
+                    if let url = fileURL(from: item) {
+                        lock.lock()
+                        collected.append(url)
+                        lock.unlock()
+                    }
+                    group.leave()
+                }
             }
         }
 
         group.notify(queue: .main) {
             completion(collected)
+        }
+    }
+
+    /// Decodes whatever shape a `public.file-url` provider hands back.
+    private static func fileURL(from item: NSSecureCoding?) -> URL? {
+        switch item {
+        case let url as URL:
+            return url
+        case let data as Data:
+            return URL(dataRepresentation: data, relativeTo: nil)
+        case let string as String:
+            return URL(string: string)
+        default:
+            return nil
         }
     }
 }

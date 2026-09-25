@@ -10,6 +10,13 @@ struct AlertPayload: Identifiable {
     let message: String
 }
 
+/// A header-encrypted archive that cannot even be listed without a password.
+struct PasswordPrompt: Identifiable {
+    let id = UUID()
+    let archive: URL
+    let message: String
+}
+
 /// The single source of truth for the window: tool discovery, the open archive,
 /// and the task queue.
 @MainActor
@@ -33,6 +40,13 @@ final class AppModel: ObservableObject {
     @Published var alert: AlertPayload?
     @Published var compressDraft: CompressionDraft?
     @Published var extractDraft: ExtractionDraft?
+    /// Set when an archive needs a password before it can be listed at all.
+    @Published var passwordPrompt: PasswordPrompt?
+    /// Bound to the password field of `PasswordSheet`.
+    @Published var passwordInput = ""
+    /// The password that successfully opened `openArchive`, reused when the
+    /// extract sheet opens so header-encrypted archives need to be typed once.
+    private var openArchivePassword = ""
 
     private var engine: ArchiveEngine?
     private var runningJob: Task<Void, Never>?
@@ -89,13 +103,20 @@ final class AppModel: ObservableObject {
                 archive: url,
                 password: password.isEmpty ? nil : password
             )
+            openArchivePassword = password
             apply(listing: listing, for: url)
         } catch let error as ArchiveError {
             if case .wrongPassword = error {
-                pendingPasswordArchive = url
-                alert = AlertPayload(
-                    title: "需要密码",
-                    message: "\(url.lastPathComponent) 的内容已加密，请输入密码后重试。"
+                // Header-encrypted archives (`-mhe=on`) produce no listing at
+                // all without the password, so the browser cannot open them and
+                // there is nothing to extract from. Ask for it here; the old
+                // code recorded the URL in a property that nothing ever read,
+                // leaving the user with a dead end.
+                passwordPrompt = PasswordPrompt(
+                    archive: url,
+                    message: password.isEmpty
+                        ? "\(url.lastPathComponent) 的内容与文件名都已加密，需要密码才能打开。"
+                        : "密码不正确，请重新输入 \(url.lastPathComponent) 的密码。"
                 )
             } else {
                 alert = AlertPayload(
@@ -108,8 +129,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Set when a listing failed because the archive needs a password.
-    @Published var pendingPasswordArchive: URL?
+    /// Runs the password the user typed in `PasswordSheet`.
+    func submitPassword() {
+        guard let prompt = passwordPrompt else { return }
+        let password = passwordInput
+        passwordInput = ""
+        passwordPrompt = nil
+        open(archive: prompt.archive, password: password)
+    }
+
+    func cancelPasswordEntry() {
+        passwordPrompt = nil
+        passwordInput = ""
+        statusMessage = "已取消打开加密压缩包"
+    }
 
     private func apply(listing: ArchiveListing, for url: URL) {
         self.listing = listing
@@ -126,6 +159,7 @@ final class AppModel: ObservableObject {
         listing = nil
         tree = []
         selection = []
+        openArchivePassword = ""
         statusMessage = "拖入文件即可压缩，或打开一个压缩包"
     }
 
@@ -150,6 +184,18 @@ final class AppModel: ObservableObject {
         } else {
             beginCompression(sources: urls)
         }
+    }
+
+    /// Feedback for a drop we cannot turn into file URLs.
+    ///
+    /// Without this the drop simply vanished: the zone claimed every drop, the
+    /// unusable providers were discarded, and nothing on screen changed.
+    func reportUnusableDrop() {
+        statusMessage = "拖入的内容不是文件或文件夹，已忽略"
+        alert = AlertPayload(
+            title: "无法处理拖入的内容",
+            message: "拖入的项目不是文件或文件夹。请从访达中拖入文件、文件夹或压缩包。"
+        )
     }
 
     func handleOpenURLs(_ urls: [URL]) {
@@ -198,6 +244,9 @@ final class AppModel: ObservableObject {
         extractDraft = ExtractionDraft(
             archive: archive,
             destinationDirectory: ExtractionDraft.suggestedDestination(for: archive),
+            // Reuse the password that opened this archive, so a header-encrypted
+            // one does not have to be typed a second time.
+            password: archive == openArchive ? openArchivePassword : "",
             selectedPaths: selectedPaths,
             archiveIsEncrypted: listing?.isEncrypted ?? false
         )
@@ -242,7 +291,10 @@ final class AppModel: ObservableObject {
 
     func testOpenArchive() {
         guard let openArchive else { return }
-        runIntegrityTest(on: openArchive, password: nil)
+        runIntegrityTest(
+            on: openArchive,
+            password: openArchivePassword.isEmpty ? nil : openArchivePassword
+        )
     }
 
     // MARK: - Queue
@@ -313,10 +365,27 @@ final class AppModel: ObservableObject {
                     : "\(archive.lastPathComponent) 存在问题"
             }
         } catch let error as ArchiveError {
-            if case .cancelled = error {
+            switch error {
+            case .cancelled:
                 task.markCancelled()
                 statusMessage = "已取消 \(task.title)"
-            } else {
+            case .completedWithWarnings(let messages):
+                // The command finished, but 7-Zip skipped items. Report the
+                // partial result as such instead of a green "已完成".
+                let details = messages.isEmpty
+                    ? "7-Zip 未说明跳过原因。"
+                    : messages.joined(separator: "\n")
+                task.markFinishedWithWarnings(
+                    "7-Zip 跳过了部分项目，结果不完整。",
+                    output: outputURL(for: task)
+                )
+                task.appendLog(details)
+                statusMessage = "\(task.kind.title)完成，但有项目被跳过：\(task.title)"
+                alert = AlertPayload(
+                    title: "\(task.kind.title)完成，但有警告",
+                    message: "\(task.title)\n\n7-Zip 跳过了部分项目，结果可能不完整：\n\(details)"
+                )
+            default:
                 task.markFailed(error.shortDescription)
                 if let description = error.errorDescription {
                     task.appendLog(description)
@@ -332,6 +401,15 @@ final class AppModel: ObservableObject {
                 title: "\(task.kind.title)失败：\(task.title)",
                 message: error.localizedDescription
             )
+        }
+    }
+
+    /// Where a task's result lands on disk, when it produces one.
+    private func outputURL(for task: ArchiveTask) -> URL? {
+        switch task.payload {
+        case .compress(let request): return request.destination
+        case .extract(let request): return request.destination
+        case .test: return nil
         }
     }
 

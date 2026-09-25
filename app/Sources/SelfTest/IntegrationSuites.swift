@@ -6,9 +6,24 @@ import Foundation
 /// build works.
 func resolvedToolURL() throws -> URL {
     if let override = ProcessInfo.processInfo.environment["ARCHIVE_TEST_BINARY"], !override.isEmpty {
-        let url = URL(fileURLWithPath: override)
+        // Resolve against the *starting* directory and make it absolute. A
+        // relative path stays relative in every child process, and `7zz` runs
+        // with a scratch directory as its cwd, so `../build/bin/7zz` used to
+        // vanish for exactly the calls that needed it.
+        let url: URL
+        if override.hasPrefix("/") {
+            url = URL(fileURLWithPath: override)
+        } else {
+            let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            url = cwd.appendingPathComponent(override).standardizedFileURL
+        }
+        // Not a skip: the caller asked for this exact binary, so a wrong path
+        // must fail the run instead of quietly marking integration green.
         guard FileManager.default.isExecutableFile(atPath: url.path) else {
-            throw SkipTest(reason: "ARCHIVE_TEST_BINARY 指向的文件不可执行：\(override)")
+            throw FatalTestError(
+                description: "ARCHIVE_TEST_BINARY 不可执行：\(override)"
+                    + "（解析为 \(url.path)）"
+            )
         }
         return url
     }
@@ -187,6 +202,102 @@ func registerIntegrationSuite() {
         let listing = try await engine.list(archive: archive, password: "pw")
         expectTrue(listing.entries.contains { $0.path.contains("hidden-name.txt") })
         expectTrue(listing.isEncrypted)
+    }
+
+    harness.test("头部加密的压缩包无密码时报告需要密码") {
+        let engine = try makeEngine()
+        let scratch = try TempSpace.make("encryptedheader-nopw")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let sourceDir = scratch.appendingPathComponent("src")
+        try TempSpace.write("hidden-name.txt", in: sourceDir, contents: "x")
+
+        let archive = scratch.appendingPathComponent("hdr.7z")
+        var request = CompressionRequest(sources: [sourceDir], destination: archive)
+        request.password = "pw"
+        request.encryptFileNames = true
+        try await engine.compress(request)
+
+        // 7zz exits 255 with "Enter password:" / "Break signaled" and prints no
+        // Path records at all. The UI needs `.wrongPassword` (not a silent empty
+        // listing) so it knows to ask for the password instead of showing an
+        // empty archive.
+        do {
+            let listing = try await engine.list(archive: archive)
+            fail("无密码时不应成功列出头部加密的压缩包（得到 \(listing.entries.count) 个条目）")
+        } catch let error as ArchiveError {
+            guard case .wrongPassword = error else {
+                fail("期望 .wrongPassword，实际 \(error)")
+                return
+            }
+        }
+    }
+
+    harness.test("互为前缀的兄弟目录同时压缩时不丢文件") {
+        let engine = try makeEngine()
+        let scratch = try TempSpace.make("prefix-siblings")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        // `ab` and `abc`: a bare hasPrefix made `abc` look like it lived inside
+        // `ab`, so the base directory stopped one level too deep, `abc/f2.txt`
+        // was passed as a bare name, and 7zz exited 1 without adding it.
+        let root = scratch.appendingPathComponent("pref")
+        try TempSpace.write("ab/f1.txt", in: root, contents: "one")
+        try TempSpace.write("abc/f2.txt", in: root, contents: "two")
+
+        let archive = scratch.appendingPathComponent("out.7z")
+        var request = CompressionRequest(
+            sources: [
+                root.appendingPathComponent("ab/f1.txt"),
+                root.appendingPathComponent("abc/f2.txt"),
+            ],
+            destination: archive
+        )
+        request.level = 1
+        try await engine.compress(request)
+
+        let listing = try await engine.list(archive: archive)
+        let paths = listing.entries.map(\.path)
+        expectContains(paths, "ab/f1.txt")
+        expectContains(paths, "abc/f2.txt")
+    }
+
+    harness.test("被跳过的条目以警告结束，不静默成功") {
+        let engine = try makeEngine()
+        let scratch = try TempSpace.make("warning")
+        let blocked = scratch.appendingPathComponent("src/blocked.txt")
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: blocked.path
+            )
+            try? FileManager.default.removeItem(at: scratch)
+        }
+
+        let sourceDir = scratch.appendingPathComponent("src")
+        try TempSpace.write("ok.txt", in: sourceDir, contents: "readable")
+        try TempSpace.write("blocked.txt", in: sourceDir, contents: "secret")
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000],
+            ofItemAtPath: blocked.path
+        )
+
+        var request = CompressionRequest(
+            sources: [sourceDir],
+            destination: scratch.appendingPathComponent("out.7z")
+        )
+        request.level = 1
+
+        do {
+            try await engine.compress(request)
+            fail("文件被跳过时压缩不应报成功（7zz 退出码 1 被吞掉了）")
+        } catch let error as ArchiveError {
+            guard case .completedWithWarnings(let messages) = error else {
+                fail("期望 .completedWithWarnings，实际 \(error)")
+                return
+            }
+            expectFalse(messages.isEmpty, "警告必须带上 7zz 的说明")
+        }
     }
 
     harness.test("完整性测试通过") {

@@ -5,6 +5,9 @@ struct CompressSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var draft: CompressionDraft
+    /// The existing file that the next "开始压缩" would overwrite.
+    @State private var pendingOverwrite: URL?
+    @State private var isConfirmingOverwrite = false
 
     init(initial: CompressionDraft) {
         _draft = State(initialValue: initial)
@@ -21,6 +24,28 @@ struct CompressSheet: View {
         // Tall enough that the encryption and advanced sections are visible
         // without scrolling on a 900pt-tall display.
         .frame(width: 600, height: 740)
+        .onChange(of: draft.format) { newFormat in
+            // A format without encryption support hides the password field and
+            // disables its toggle, so leaving the toggle on left the user stuck
+            // on a message ("请改用 7z 或 ZIP") with no way to clear it.
+            if !newFormat.supportsEncryption {
+                draft.usePassword = false
+            }
+        }
+        .alert(
+            "压缩包已存在",
+            isPresented: $isConfirmingOverwrite,
+            presenting: pendingOverwrite
+        ) { _ in
+            Button("覆盖", role: .destructive) {
+                pendingOverwrite = nil
+                model.startCompression(draft)
+                dismiss()
+            }
+            Button("取消", role: .cancel) { pendingOverwrite = nil }
+        } message: { existing in
+            Text("\(existing.lastPathComponent) 已存在，继续将覆盖它。")
+        }
     }
 
     // MARK: - Sections
@@ -172,8 +197,13 @@ struct CompressSheet: View {
             Button("取消") { dismiss() }
                 .keyboardShortcut(.cancelAction)
             Button("开始压缩") {
-                model.startCompression(draft)
-                dismiss()
+                if let existing = existingOutput() {
+                    pendingOverwrite = existing
+                    isConfirmingOverwrite = true
+                } else {
+                    model.startCompression(draft)
+                    dismiss()
+                }
             }
             .keyboardShortcut(.defaultAction)
             .disabled(draft.validationMessage != nil)
@@ -183,6 +213,21 @@ struct CompressSheet: View {
     }
 
     // MARK: - Actions
+
+    /// The file this draft would replace, if any.
+    ///
+    /// 7-Zip overwrites a same-named archive without asking, so the confirmation
+    /// has to come from here. Split volumes are checked through their first
+    /// part, which is the file the user would recognise.
+    private func existingOutput() -> URL? {
+        let destination = draft.destinationURL
+        if FileManager.default.fileExists(atPath: destination.path) { return destination }
+        if !draft.splitVolume.trimmingCharacters(in: .whitespaces).isEmpty {
+            let firstVolume = URL(fileURLWithPath: destination.path + ".001")
+            if FileManager.default.fileExists(atPath: firstVolume.path) { return firstVolume }
+        }
+        return nil
+    }
 
     private func reselectSources() {
         let picked = Panels.chooseSourcesToCompress()

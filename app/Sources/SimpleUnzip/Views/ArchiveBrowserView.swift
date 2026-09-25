@@ -38,6 +38,12 @@ struct ArchiveBrowserView: View {
             filter = ""
             expandTopLevel()
         }
+        // A row that the filter hides must not stay selected: "解压所选" would
+        // otherwise extract entries the user can no longer see.
+        .onChange(of: filter) { _ in
+            let visible = Set(rows.map(\.id))
+            model.selection.formIntersection(visible)
+        }
     }
 
     // MARK: - Sections
@@ -181,12 +187,15 @@ struct ArchiveBrowserView: View {
         let trimmed = filter.trimmingCharacters(in: .whitespaces)
         guard trimmed.isEmpty else {
             // A filter turns the outline into a flat list of matching paths.
+            // Rows still borrow the real tree node, so a matched folder shows
+            // its true subtree size instead of the 0 of a synthetic leaf.
+            let index = nodesByPath
             return listing.entries
                 .filter { $0.path.localizedCaseInsensitiveContains(trimmed) }
                 .map { entry in
                     FlatRow(
                         id: entry.path,
-                        node: ArchiveTreeNode(
+                        node: index[entry.path] ?? ArchiveTreeNode(
                             name: entry.name,
                             path: entry.path,
                             entry: entry,
@@ -203,6 +212,19 @@ struct ArchiveBrowserView: View {
         var result: [FlatRow] = []
         flatten(model.tree, depth: 0, into: &result)
         return result
+    }
+
+    /// Every node of the current tree, keyed by in-archive path.
+    private var nodesByPath: [String: ArchiveTreeNode] {
+        var index: [String: ArchiveTreeNode] = [:]
+        func walk(_ nodes: [ArchiveTreeNode]) {
+            for node in nodes {
+                index[node.path] = node
+                walk(node.children)
+            }
+        }
+        walk(model.tree)
+        return index
     }
 
     private func flatten(_ nodes: [ArchiveTreeNode], depth: Int, into result: inout [FlatRow]) {

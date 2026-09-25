@@ -155,6 +155,10 @@ open "dist/Simple Unzip.app"
 构建脚本会自动处理本机环境的两个限制：SwiftPM 需要 `--disable-sandbox`
 （它内部会调用 `sandbox-exec`），以及把编译缓存重定向到工作区内。
 
+> 如果你不是用 `git clone` 拿到这份代码（例如通过下载压缩包、AirDrop 或拷贝目录），
+> 可执行权限可能在传输中丢失，运行脚本会报 `Permission denied`。执行一次
+> `chmod +x scripts/*.sh` 即可；`git clone` 与 `git archive` 都会保留该权限。
+
 如需分发现成二进制，建议将 `dist/Simple Unzip.app` 压缩后发布到 GitHub Releases，
 而不是提交进仓库。**但请注意：一旦分发二进制，就触发 LGPL「提供对应源码」的义务**，
 详见「许可证」一节的说明。
@@ -165,14 +169,21 @@ open "dist/Simple Unzip.app"
 
 ```bash
 cd app
-ARCHIVE_TEST_BINARY="../build/bin/7zz" \
-ARCHIVE_TEST_TMP="../build/testtmp" \
-ARCHIVE_STAGING_DIR="../build/staging" \
+ARCHIVE_TEST_BINARY="$PWD/../build/bin/7zz" \
+ARCHIVE_TEST_TMP="$PWD/../build/testtmp" \
+ARCHIVE_STAGING_DIR="$PWD/../build/staging" \
 swift run --disable-sandbox --scratch-path ../build/app-build SelfTest
 ```
 
-当前结果：**通过 51 ｜ 失败 0**。覆盖范围包括输出解析、进度解析、真实压缩包往返、
-三种压缩型 tar、加密与错误密码处理、任务取消、中文与空格路径。
+`ARCHIVE_TEST_BINARY` 必须是**绝对路径**（上面的 `$PWD` 就是为此）。集成测试里的
+`7zz` 以各自的临时目录为工作目录运行，相对路径会被解析成不存在的位置；运行器会把
+相对路径按启动目录补全成绝对路径，但如果最终指向的文件不可执行，**整个运行直接失败**
+（`ARCHIVE_TEST_BINARY` 是显式要求，不会被当成「跳过」而伪装成通过）。
+退出码为 0 才算通过，可直接接 CI。
+
+当前结果：**通过 56 ｜ 失败 0 ｜ 跳过 0**。覆盖范围包括输出解析、进度解析、真实压缩包往返、
+三种压缩型 tar、加密与错误密码处理、头部加密（`-mhe=on`）、任务取消、中文与空格路径，
+以及「互为前缀的兄弟目录」和「退出码 1 警告」这两个曾经的静默丢文件回归项。
 
 也可对指定的真实文件执行一次完整的列表与解压往返：
 
@@ -195,6 +206,8 @@ ARCHIVE_EXTRA_ARCHIVE="/绝对路径/某文件.tar.xz" swift run … SelfTest
   会临时写出 121 MB（约 0.8 秒），完成后立即删除。超大归档的打开会明显变慢。
 - **`.gz` / `.bz2` / `.xz` 只能压缩单个文件**。这是格式本身的限制（它们不是归档格式，
   没有目录结构概念），不是程序的缺陷。压缩文件夹请选用 TAR.GZ / TAR.XZ。
+  界面会在按下「开始压缩」之前就拦住并说明原因，不会再把 7-Zip 的
+  `E_INVALIDARG` 原样抛给用户。
 - **冷门格式未做穷举测试**。ISO/WIM、特殊分卷等只验证了通用路径，没有逐个构造样本测试。
 - **不支持创建 RAR 压缩包**。RAR 压缩算法属于未公开的专有技术，第三方不存在合法实现；
   本软件对 RAR 只具备**解压**能力（由 7-Zip 引擎提供）。
@@ -214,7 +227,9 @@ ARCHIVE_EXTRA_ARCHIVE="/绝对路径/某文件.tar.xz" swift run … SelfTest
 
 - 解压遇到同名文件时会按你选择的策略处理，**默认策略是覆盖**。请在解压到已有内容的
   目录前确认，或改用「跳过已存在」/「重命名」。
-- 压缩操作可能覆盖同名的已有压缩包。
+- 压缩操作会覆盖同名的已有压缩包，**界面会先弹出确认**（分卷压缩检查第一部分）。
+- 压缩过程中若 7-Zip 跳过了某些条目（例如没有读取权限的文件），任务会以
+  **「有警告」**结束并列出被跳过的项目，而不是显示绿色的「已完成」。
 - 不建议把本软件作为唯一的数据保管手段。**重要数据请始终保留独立备份。**
 - 本软件尚未经过广泛测试，作者能力有限（见「关于作者与免责」一节），
   请勿用于对可靠性有严格要求的场景。

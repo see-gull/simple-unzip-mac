@@ -66,15 +66,20 @@ $ 7zz a -t7z -mx9 -bsp1 -bso0 slow.7z big
 
 ```
 cd app
-ARCHIVE_TEST_BINARY=../build/bin/7zz ARCHIVE_TEST_TMP=../build/testtmp \
+ARCHIVE_TEST_BINARY="$PWD/../build/bin/7zz" ARCHIVE_TEST_TMP="$PWD/../build/testtmp" \
   swift run --disable-sandbox --scratch-path ../build/app-build SelfTest
 ```
 
 完整输出见 `docs/selftest-output.txt`，结论：
 
 ```
-通过 51 ｜ 失败 0 ｜ 跳过 0 ｜ 用时 1.4s
+通过 56 ｜ 失败 0 ｜ 跳过 0 ｜ 用时 1.5s
 ```
+
+`ARCHIVE_TEST_BINARY` 用绝对路径是硬性要求（见第 7 节 #5）：集成测试里的 `7zz`
+以自己的临时目录为工作目录运行，相对路径会被解析到不存在的位置。运行器现在会把相对
+路径按启动目录补全；若最终指向的文件仍不可执行，则**整个运行以失败结束**，不再退化成
+「跳过 16 项、退出码 0」的假绿。
 
 ### 4.1 先修的是测试运行器本身（重要）
 
@@ -294,3 +299,132 @@ owner=Simple Unzip layer=0 alpha=1.0 onscreen=true bounds=[Width: 960, Height: 6
   没有逐个构造样本测试。
 - **大文件与网络卷未压测**：最大只测到 48MB 的本地文件。
 - **未做多显示器与深色模式的适配验证**：快照固定使用 `.aqua` 外观。
+
+## 7. 复审修复记录（外部测试反馈）
+
+一轮外部测试提交了 15 条「功能 bug」清单（按用户可感知的严重度排序）。逐条复核后，
+**14 条在代码中确认存在并已修复，1 条未能复现**。下面按清单编号记录结论与验证方式，
+未复现的那条也照实记录。
+
+### 7.1 会静默丢文件的两条（同一根因，已修）
+
+**#1 `commonAncestor` 缺少目录边界判断**（`ArchiveEngine.swift`）。
+
+```
+commonAncestor(/tmp/x/ab/f1.txt, /tmp/x/abc/f2.txt)
+  期望 /tmp/x   实际 /tmp/x/ab        ← "/tmp/x/abc".hasPrefix("/tmp/x/ab") == true
+```
+
+本机用编译好的 7zz 复现过原始故障：两个「互为前缀」的兄弟目录一起压缩时，
+引擎在错误的目录里以裸文件名执行，`abc/f2.txt` 根本没进包：
+
+```
+$ cd pref/ab && 7zz a -t7z bug.7z f1.txt f2.txt
+WARNING: errno=2 : No such file or directory   f2.txt
+Scan WARNINGS: 1
+EXIT=1
+$ 7zz l -slt bug.7z | grep '^Path ='
+Path = f1.txt                                  ← abc/f2.txt 消失了
+```
+
+修法是加 `isContained(_:in:)`，按路径分隔符判断包含关系而不是裸 `hasPrefix`。
+
+**#6 退出码 1（警告）一律当成功**（`ArchiveEngine.failure`）。这是 #1 之所以「静默」的
+原因：7-Zip 用 1 表示「完成但有项目被跳过」，原实现 `case 0, 1: return nil` 直接吞掉。
+实测一个无读取权限的文件：
+
+```
+WARNING: errno=13 : Permission denied   func/noperm.txt
+WARNING: Cannot open 1 file     EXIT=1
+```
+
+现在写文件类命令（`a` / `x` / 拆 tar）把退出码 1 报为 `.completedWithWarnings`，任务以
+**「有警告」**结束、弹出说明并列出被跳过的条目；只读命令（`l` / `t`）保持宽容——
+一个良性警告不该让本来能正常浏览的压缩包打不开。
+
+### 7.2 功能不可用（已修）
+
+**#2 头部加密（`-mhe=on`）的压缩包在界面里打不开**。实测：
+
+```
+$ 7zz l -slt enc.7z     →  Enter password: / Break signaled，Path 条目 0，EXIT=255
+$ 7zz l -slt -pPw123 enc.7z  →  正常列出
+```
+
+原代码把这种情况记进 `pendingPasswordArchive`，而全文没有任何读取方——用户看到
+「需要密码」的弹窗，点掉之后没有任何输入框，只能重开。现在该状态驱动一个
+`PasswordSheet`（新增 `Views/PasswordSheet.swift`），密码错误会重新提示；
+成功打开后密码会被复用，解压面板与完整性校验不必二次输入。
+
+### 7.3 静默出错与状态错乱（已修）
+
+| # | 位置 | 处理 |
+|---|------|------|
+| 3 | `CompressionDraft.validationMessage` | 新增 `ArchiveFormat.holdsSingleItemOnly`（gz/bz2/xz），多文件或文件夹在选择格式后立刻拦截，不再把 `E_INVALIDARG` 抛给用户 |
+| 7 | `RunningProcess.settleIfReady` | 取消标志只在该子进程确实没跑完（退出码非 0）时才报「已取消」；退出码 0 说明结果已落盘，必须报成功 |
+| 8 | `ArchiveBrowserView` | 筛选条件变化时把选中集与当前可见行求交集，避免「解压所选」解出看不见的行 |
+| 9 | `ExtractSheet.chooseDestination` | 目录选择面板改为定位到界面显示的**目标文件夹**本身（不存在则临时建、取消则回收空目录），不再默认落到父目录 |
+| 10 | `DisplayFormat.bytes` | `nil`（未知）与 `0`（真实空文件）不再混同；筛选模式的行改为复用真实树节点，文件夹显示真实子树大小 |
+| 11 | `DropZoneView` + `Panels.loadFileURLs` | 只有确实能读出文件 URL 时才接受拖放；读不出来则状态栏与弹窗明确说明，并补上 `public.file-url` 载荷的解码分支 |
+| 12 | `SimpleUnzipApp.pullWindowsBackOnScreen` | 改用 `window.screen ?? NSScreen.main`，副屏窗口不再每次启动被拽回主屏并缩掉 40pt |
+
+### 7.4 小毛病（已修）
+
+- **#13**：切到不支持加密的格式时自动关闭「使用密码」开关，不再出现「提示要改格式、
+  但开关是禁用状态」的死锁。
+- **#14**：目标压缩包已存在时先弹确认（分卷压缩检查 `.001`）。
+
+### 7.5 未复现与未修
+
+- **#4「`scripts/` 全是 100644」：未能复现。** 本仓库的 git 索引里两个脚本都是
+  `100755`，并且实测做了一次干净 clone：
+
+  ```
+  $ git ls-files -s scripts/
+  100755 ... build-app.sh
+  100755 ... fetch-source.sh
+  $ git clone -q . /tmp/clonechk && ls -l /tmp/clonechk/scripts/
+  -rwxr-xr-x  build-app.sh
+  -rwxr-xr-x  fetch-source.sh
+  ```
+
+  该现象符合「用非 git 方式取到代码」（下载 zip、AirDrop、拷贝目录）时权限位丢失。
+  已在 README 构建一节补上 `chmod +x scripts/*.sh` 的说明，未改动权限位本身。
+- **#5 自测命令与「假绿」：已修。** `ARCHIVE_TEST_BINARY` 的相对路径在子进程里会被
+  按临时工作目录解析，运行器现在先按启动目录补全为绝对路径；若显式指定的二进制不可
+  执行，则抛 `FatalTestError` 让整轮运行失败（此前会退化成「跳过」并返回 0）。
+  刻意写错路径的实测结果：`通过 37 ｜ 失败 19`，退出码 1。README 与本文档的示例命令
+  已改用绝对路径。
+- **#15「界面全中文硬编码、无本地化」：未修。** 完整本地化会触及每一个视图与文案，
+  属于结构性改动而非 bug 修复，且需要英文文案校对。保留为已知限制。
+
+### 7.6 新增回归测试
+
+自检从 51 项增加到 56 项，新增的 5 项正对上面最容易复发的缺陷：
+
+- `名字互为前缀的兄弟目录不会退化成其中一个`（单元）
+- `退出码 1：只读命令宽容，写文件命令报警告`（单元）
+- `互为前缀的兄弟目录同时压缩时不丢文件`（集成）
+- `被跳过的条目以警告结束，不静默成功`（集成，用 `chmod 000` 制造真实警告）
+- `头部加密的压缩包无密码时报告需要密码`（集成）
+
+### 7.7 新界面的离屏验证
+
+新增的两块界面用仓库既有的离屏渲染（`ARCHIVE_RENDER_PREVIEWS`，见第 5 节）验证，
+产物已归档：
+
+- `docs/previews/10-password-sheet.png`：头部加密压缩包的密码输入面板
+  （标题、包名、说明、密码框、「取消 / 打开」，密码为空时「打开」为禁用态）。
+- `docs/previews/11-task-warning.png`：任务行的「有警告」状态
+  （橙色徽标 + 跳过说明 + 「在访达中显示」）。
+
+渲染命令（用到包内 7zz 时通过 `ARCHIVE_BINARY` 指定）：
+
+```bash
+ARCHIVE_RENDER_PREVIEWS="$PWD/build/previews-review" \
+ARCHIVE_PREVIEW_DEMO="$PWD/build/preview-demo" \
+ARCHIVE_BINARY="$PWD/build/bin/7zz" \
+"$PWD/build/app-build/debug/SimpleUnzip"
+```
+
+仍未自动化的交互（拖放、确认弹窗、多显示器拖动）只能人工确认，见第 6 节。

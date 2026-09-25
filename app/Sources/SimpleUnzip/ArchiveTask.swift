@@ -40,6 +40,10 @@ final class ArchiveTask: ObservableObject, Identifiable {
         case queued
         case running
         case finished
+        /// The command ran to completion but 7-Zip reported skipped items.
+        /// Distinct from `.finished` so a partial result is never shown as a
+        /// clean success.
+        case finishedWithWarnings(String)
         case failed(String)
         case cancelled
 
@@ -55,6 +59,7 @@ final class ArchiveTask: ObservableObject, Identifiable {
             case .queued: return "排队中"
             case .running: return "进行中"
             case .finished: return "已完成"
+            case .finishedWithWarnings: return "有警告"
             case .failed: return "失败"
             case .cancelled: return "已取消"
             }
@@ -142,6 +147,14 @@ final class ArchiveTask: ObservableObject, Identifiable {
         finishedAt = Date()
     }
 
+    /// The work produced output, but 7-Zip reported items it had to skip.
+    func markFinishedWithWarnings(_ message: String, output: URL?) {
+        state = .finishedWithWarnings(message)
+        fraction = 1.0
+        finishedAt = Date()
+        if let output { outputURL = output }
+    }
+
     func markCancelled() {
         state = .cancelled
         finishedAt = Date()
@@ -183,6 +196,16 @@ struct CompressionDraft: Identifiable {
     var validationMessage: String? {
         if sources.isEmpty { return "请先选择要压缩的文件。" }
         if archiveName.trimmingCharacters(in: .whitespaces).isEmpty { return "请填写压缩包名称。" }
+        if format.holdsSingleItemOnly {
+            if sources.count > 1 {
+                return "\(format.displayName) 只能压缩单个文件，当前选了 \(sources.count) 项，"
+                    + "请改用 7z、ZIP 或 TAR.GZ。"
+            }
+            if let first = sources.first, Panels.isDirectory(first) {
+                return "\(format.displayName) 只能压缩单个文件，不能压缩文件夹，"
+                    + "请改用 7z、ZIP 或 TAR.GZ。"
+            }
+        }
         if usePassword && password.isEmpty { return "已启用密码，但密码为空。" }
         if usePassword && !format.supportsEncryption {
             return "\(format.displayName) 格式不支持加密，请改用 7z 或 ZIP。"

@@ -103,6 +103,18 @@ public final class ArchiveOutputParser {
 
     public var hadErrors: Bool { !errors.isEmpty }
 
+    /// The lines worth showing when a command ended with warnings.
+    ///
+    /// Warnings reach us in two shapes: some are classified as errors
+    /// (`WARNING: Cannot open 1 file`), others look like ordinary log lines
+    /// (`func/x.txt : errno=13 : Permission denied`). Prefer the classified
+    /// ones, and fall back to the tail of the log so the user is never told
+    /// "finished with warnings" without being told *which* warnings.
+    public var failureDetails: [String] {
+        if !errors.isEmpty { return errors }
+        return Array(messages.suffix(5))
+    }
+
     private func handleLine(_ rawLine: String) {
         let line = Self.clean(rawLine)
         guard !line.isEmpty else { return }

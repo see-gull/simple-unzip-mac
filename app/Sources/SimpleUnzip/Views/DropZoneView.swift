@@ -54,8 +54,23 @@ struct DropZoneView: View {
             .padding(40)
         }
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isTargeted) { providers in
+            // Only claim the drop when there is something we can actually read;
+            // returning `true` unconditionally made an unusable drop look like
+            // it had been accepted, with nothing happening afterwards.
+            guard providers.contains(where: {
+                $0.canLoadObject(ofClass: URL.self)
+                    || $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+            }) else {
+                model.reportUnusableDrop()
+                return false
+            }
+
             Panels.loadFileURLs(from: providers) { urls in
-                model.handleDrop(urls: urls)
+                if urls.isEmpty {
+                    model.reportUnusableDrop()
+                } else {
+                    model.handleDrop(urls: urls)
+                }
             }
             return true
         }

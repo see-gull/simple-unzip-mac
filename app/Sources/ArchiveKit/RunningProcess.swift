@@ -138,7 +138,12 @@ public final class RunningProcess {
         stateLock.unlock()
 
         if !trailing.isEmpty { textSink?(trailing) }
-        sink?(wasCancelled ? .failure(ArchiveError.cancelled) : .success(code))
+        // Cancellation only counts if the child actually failed to finish. A
+        // cancel that loses the race against an already-exited process (exit 0,
+        // output written) must report success: telling the user "已取消" while
+        // the archive sits on disk hides a real result.
+        let cancelledInTime = wasCancelled && code != 0
+        sink?(cancelledInTime ? .failure(ArchiveError.cancelled) : .success(code))
     }
 
     /// Asks `7zz` to stop, escalating to SIGKILL if it does not exit promptly.

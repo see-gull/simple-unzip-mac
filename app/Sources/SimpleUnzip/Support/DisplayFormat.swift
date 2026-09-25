@@ -15,8 +15,11 @@ enum DisplayFormat {
         return formatter
     }()
 
+    /// `nil` means "unknown" and prints as an em dash. A real `0` is not
+    /// unknown — a zero-byte file exists and is empty — so it must print as
+    /// `Zero bytes`, not as `—`.
     static func bytes(_ value: Int64?) -> String {
-        guard let value, value > 0 else { return "—" }
+        guard let value else { return "—" }
         return byteFormatter.string(fromByteCount: value)
     }
 

@@ -6,6 +6,16 @@ struct SkipTest: Error {
     let reason: String
 }
 
+/// A test that cannot run for a reason that must **not** be silently skipped.
+///
+/// A skipped test still exits 0, so anything the user explicitly asked for (an
+/// `ARCHIVE_TEST_BINARY`, a fixture path) has to fail loudly instead: a typo in
+/// the environment used to turn 16 integration tests into "skipped" and the run
+/// into a green tick.
+struct FatalTestError: Error, CustomStringConvertible {
+    let description: String
+}
+
 /// Minimal test registry and assertion set.
 ///
 /// This machine has only Command Line Tools, which ship no XCTest and no

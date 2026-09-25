@@ -8,6 +8,12 @@ public enum ArchiveError: Error, LocalizedError, Equatable {
     case launchFailed(String)
     /// `7zz` exited with a non-zero status.
     case commandFailed(exitCode: Int32, messages: [String])
+    /// `7zz` exit code 1: it produced output but skipped items on the way.
+    ///
+    /// This is the "warning" status. The result on disk is usually real but
+    /// **incomplete** — files it could not read are simply absent — so it must
+    /// never be reported to the user as a plain success.
+    case completedWithWarnings(messages: [String])
     /// The operation was cancelled by the user.
     case cancelled
     /// Output from `7zz` could not be interpreted.
@@ -24,6 +30,14 @@ public enum ArchiveError: Error, LocalizedError, Equatable {
         case .commandFailed(let code, let messages):
             let detail = messages.isEmpty ? "7zz 未提供更多信息。" : messages.joined(separator: "\n")
             return "7zz 执行失败（退出码 \(code)）：\n\(detail)"
+        case .completedWithWarnings(let messages):
+            let detail = messages.isEmpty
+                ? "7zz 未说明原因。"
+                : messages.joined(separator: "\n")
+            return """
+            7-Zip 以警告结束（退出码 1）：有项目被跳过，结果可能不完整。
+            \(detail)
+            """
         case .cancelled:
             return "操作已取消。"
         case .parseFailed(let reason):
@@ -40,6 +54,7 @@ public enum ArchiveError: Error, LocalizedError, Equatable {
         case .toolNotFound: return "找不到 7zz"
         case .launchFailed: return "无法启动 7zz"
         case .commandFailed(let code, _): return "7zz 失败（退出码 \(code)）"
+        case .completedWithWarnings: return "已完成，但有项目被跳过"
         case .cancelled: return "已取消"
         case .parseFailed: return "输出解析失败"
         case .wrongPassword: return "密码错误"

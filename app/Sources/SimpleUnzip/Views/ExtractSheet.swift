@@ -128,12 +128,38 @@ struct ExtractSheet: View {
     }
 
     private func chooseDestination() {
-        if let directory = Panels.chooseDirectory(
+        // Seed the panel with the folder the sheet actually shows. Seeding it
+        // with the *parent* meant that confirming without navigating silently
+        // moved the destination one level up, scattering the files next to the
+        // archive. A directory picker selects the folder it is *browsing*, so
+        // the folder has to exist for the panel to open inside it.
+        let destination = draft.destinationDirectory
+        let alreadyExisted = FileManager.default.fileExists(atPath: destination.path)
+        if !alreadyExisted {
+            try? FileManager.default.createDirectory(
+                at: destination,
+                withIntermediateDirectories: true
+            )
+        }
+
+        let picked = Panels.chooseDirectory(
             title: "选择解压位置",
             prompt: "选择",
-            defaultURL: draft.destinationDirectory.deletingLastPathComponent()
-        ) {
-            draft.destinationDirectory = directory
+            defaultURL: destination
+        )
+
+        if let picked {
+            draft.destinationDirectory = picked
+        } else if !alreadyExisted {
+            // The folder only existed to position the panel; if the user backed
+            // out, leave the disk as it was — and only if nothing landed in it.
+            removeIfEmpty(destination)
         }
+    }
+
+    private func removeIfEmpty(_ url: URL) {
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
+        guard contents.isEmpty else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 }

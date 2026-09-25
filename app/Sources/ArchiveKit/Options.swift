@@ -71,6 +71,16 @@ public enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
         default: return true
         }
     }
+
+    /// `gz`/`bz2`/`xz` wrap a *single* byte stream. Handing 7-Zip more than one
+    /// item — or a folder — makes it exit with `E_INVALIDARG`, which the user
+    /// only ever saw as a bare "退出码 2". Stating the limit up front is the fix.
+    public var holdsSingleItemOnly: Bool {
+        switch self {
+        case .gzip, .bzip2, .xz: return true
+        default: return false
+        }
+    }
 }
 
 /// How `7zz` should treat a file that already exists at the destination.

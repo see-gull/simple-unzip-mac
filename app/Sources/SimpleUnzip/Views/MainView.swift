@@ -20,6 +20,10 @@ struct MainView: View {
             ExtractSheet(initial: draft)
                 .environmentObject(model)
         }
+        .sheet(item: $model.passwordPrompt) { prompt in
+            PasswordSheet(prompt: prompt)
+                .environmentObject(model)
+        }
         .alert(item: $model.alert) { payload in
             Alert(
                 title: Text(payload.title),

@@ -80,11 +80,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// this machine: a launch landed at (729, 677) on a 1440x900 screen.
     /// Pull any such window back to the centre of the usable area.
     private static func pullWindowsBackOnScreen() {
-        guard let screen = NSScreen.main else { return }
-        let visible = screen.visibleFrame
-
         for window in NSApp.windows
         where window.isVisible && window.styleMask.contains(.titled) {
+            // Use the screen the window is actually on. `NSScreen.main` is the
+            // screen with the key window, so a window parked on a second
+            // display was measured against the primary one, scored a coverage
+            // of 0, and got yanked to the main screen on every launch.
+            guard let screen = window.screen ?? NSScreen.main else { continue }
+            let visible = screen.visibleFrame
             let frame = window.frame
             guard frame.width > 1, frame.height > 1 else { continue }
 

@@ -1,4 +1,5 @@
 import AppKit
+import ArchiveKit
 import SwiftUI
 
 /// Renders SwiftUI screens to PNG files without a visible window.
@@ -104,6 +105,40 @@ enum PreviewRenderer {
                 to: outputDirectory.appendingPathComponent("06-extract-sheet.png")
             )
         }
+
+        // The password prompt for header-encrypted archives, and the task-row
+        // state that replaces a green "已完成" when 7-Zip skipped items.
+        render(
+            PasswordSheet(
+                prompt: PasswordPrompt(
+                    archive: URL(fileURLWithPath: "/tmp/加密备份.7z"),
+                    message: "加密备份.7z 的内容与文件名都已加密，需要密码才能打开。"
+                )
+            )
+            .environmentObject(model),
+            size: CGSize(width: 440, height: 260),
+            to: outputDirectory.appendingPathComponent("10-password-sheet.png")
+        )
+
+        let warningTask = ArchiveTask(
+            kind: .compress,
+            title: "备份.7z",
+            subtitle: "3 个项目",
+            payload: .compress(
+                CompressionRequest(
+                    sources: [demoRoot],
+                    destination: outputDirectory.appendingPathComponent("备份.7z")
+                )
+            )
+        )
+        warningTask.markFinishedWithWarnings("7-Zip 跳过了部分项目，结果不完整。", output: nil)
+        render(
+            TaskRowView(task: warningTask)
+                .environmentObject(model)
+                .padding(12),
+            size: CGSize(width: 300, height: 96),
+            to: outputDirectory.appendingPathComponent("11-task-warning.png")
+        )
 
         print("[preview] 完成，输出目录：\(outputDirectory.path)")
     }

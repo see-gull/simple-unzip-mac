@@ -106,6 +106,16 @@ struct TaskRowView: View {
     @EnvironmentObject private var model: AppModel
     @State private var isShowingLog = false
 
+    /// A result on disk is worth revealing whenever the task produced one —
+    /// including the partial result that ended with warnings.
+    private var showsRevealButton: Bool {
+        guard task.outputURL != nil else { return false }
+        switch task.state {
+        case .finished, .finishedWithWarnings: return true
+        default: return false
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
@@ -142,6 +152,11 @@ struct TaskRowView: View {
                     .font(.caption2)
                     .foregroundStyle(.red)
                     .lineLimit(2)
+            case .finishedWithWarnings(let message):
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
             case .finished, .cancelled:
                 Text("\(task.subtitle) · \(task.durationDescription)")
                     .font(.caption2)
@@ -156,7 +171,7 @@ struct TaskRowView: View {
                         .buttonStyle(.link)
                         .font(.caption2)
                 }
-                if case .finished = task.state, task.outputURL != nil {
+                if showsRevealButton {
                     Button("在访达中显示") { model.reveal(task) }
                         .buttonStyle(.link)
                         .font(.caption2)
@@ -208,6 +223,7 @@ struct StateBadge: View {
         case .queued: return Color.secondary.opacity(0.18)
         case .running: return Color.accentColor.opacity(0.22)
         case .finished: return Color.green.opacity(0.22)
+        case .finishedWithWarnings: return Color.orange.opacity(0.22)
         case .failed: return Color.red.opacity(0.22)
         case .cancelled: return Color.orange.opacity(0.22)
         }
@@ -218,6 +234,7 @@ struct StateBadge: View {
         case .queued: return .secondary
         case .running: return .accentColor
         case .finished: return .green
+        case .finishedWithWarnings: return .orange
         case .failed: return .red
         case .cancelled: return .orange
         }

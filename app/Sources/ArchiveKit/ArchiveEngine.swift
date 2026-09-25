@@ -120,6 +120,7 @@ public final class ArchiveEngine {
         password: String?,
         into staging: URL,
         cancellation: CancellationHandle?,
+        warningsAreFailures: Bool = false,
         onLog: ((String) -> Void)?
     ) async throws -> URL {
         var peel = ["x"] + Self.baseSwitches + ["-bso0", "-bsp0", "-o" + staging.path]
@@ -131,6 +132,7 @@ public final class ArchiveEngine {
             arguments: peel,
             cancellation: cancellation,
             passwordSupplied: !(password ?? "").isEmpty,
+            warningsAreFailures: warningsAreFailures,
             onLog: onLog
         )
 
@@ -218,6 +220,7 @@ public final class ArchiveEngine {
             arguments: arguments,
             cancellation: cancellation,
             passwordSupplied: !(request.password ?? "").isEmpty,
+            warningsAreFailures: true,
             onProgress: onProgress,
             onLog: onLog
         )
@@ -256,6 +259,7 @@ public final class ArchiveEngine {
             password: request.password,
             into: staging,
             cancellation: cancellation,
+            warningsAreFailures: true,
             onLog: onLog
         )
 
@@ -271,6 +275,7 @@ public final class ArchiveEngine {
             arguments: unpack,
             cancellation: cancellation,
             passwordSupplied: !(request.password ?? "").isEmpty,
+            warningsAreFailures: true,
             onProgress: onProgress,
             onLog: onLog
         )
@@ -332,6 +337,7 @@ public final class ArchiveEngine {
             workingDirectory: base,
             cancellation: cancellation,
             passwordSupplied: !(request.password ?? "").isEmpty,
+            warningsAreFailures: true,
             onProgress: onProgress,
             onLog: onLog
         )
@@ -361,6 +367,7 @@ public final class ArchiveEngine {
             arguments: tarArguments,
             workingDirectory: base,
             cancellation: cancellation,
+            warningsAreFailures: true,
             onLog: onLog
         )
 
@@ -378,6 +385,7 @@ public final class ArchiveEngine {
         _ = try await execute(
             arguments: compressArguments,
             cancellation: cancellation,
+            warningsAreFailures: true,
             onProgress: onProgress,
             onLog: onLog
         )
@@ -433,11 +441,25 @@ public final class ArchiveEngine {
         }
         for url in urls.dropFirst() {
             let directory = url.standardizedFileURL.deletingLastPathComponent()
-            while !directory.path.hasPrefix(candidate.path) && candidate.path != "/" {
+            while !isContained(directory, in: candidate) && candidate.path != "/" {
                 candidate = candidate.deletingLastPathComponent()
             }
         }
         return candidate
+    }
+
+    /// True when `directory` is `ancestor` itself or lives inside it.
+    ///
+    /// A bare `hasPrefix` is wrong here: `/x/abc` starts with `/x/ab`, so the
+    /// sibling directories `ab` and `abc` used to look like one subtree. The
+    /// depth then stayed at `/x/ab`, `abc/f2.txt` was handed to `7zz` as a bare
+    /// name, `7zz` could not find it, and it exited with code 1 — which used to
+    /// be swallowed as success, silently dropping the file from the archive.
+    static func isContained(_ directory: URL, in ancestor: URL) -> Bool {
+        let base = ancestor.standardizedFileURL.path
+        let path = directory.standardizedFileURL.path
+        if path == base { return true }
+        return path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
     }
 
     // MARK: - Process plumbing
@@ -447,6 +469,7 @@ public final class ArchiveEngine {
         workingDirectory: URL? = nil,
         cancellation: CancellationHandle? = nil,
         passwordSupplied: Bool = false,
+        warningsAreFailures: Bool = false,
         onProgress: ((TaskProgress) -> Void)? = nil,
         onLog: ((String) -> Void)? = nil
     ) async throws -> ArchiveOutputParser {
@@ -483,7 +506,8 @@ public final class ArchiveEngine {
         if let error = Self.failure(
             exitCode: exitCode,
             parser: parser,
-            passwordSupplied: passwordSupplied
+            passwordSupplied: passwordSupplied,
+            warningsAreFailures: warningsAreFailures
         ) {
             throw error
         }
@@ -500,14 +524,25 @@ public final class ArchiveEngine {
     /// it as `.cancelled`; 7-Zip also returns 255 when it wants a password but
     /// stdin is not a terminal ("Break signaled"), which used to be reported to
     /// the user as a cancellation instead of a missing password.
+    ///
+    /// `warningsAreFailures` is for the commands that write files. Exit code 1
+    /// there means "the archive or the extracted tree is missing whatever 7-Zip
+    /// could not read", and reporting that as success is how a compression job
+    /// used to drop files while the UI showed a green "已完成". Read-only
+    /// commands (`l`, `t`) leave it off so a benign warning never blocks
+    /// browsing an archive that lists fine.
     static func failure(
         exitCode: Int32,
         parser: ArchiveOutputParser,
-        passwordSupplied: Bool = false
+        passwordSupplied: Bool = false,
+        warningsAreFailures: Bool = false
     ) -> ArchiveError? {
         switch exitCode {
-        case 0, 1:
+        case 0:
             return nil
+        case 1:
+            guard warningsAreFailures else { return nil }
+            return .completedWithWarnings(messages: parser.failureDetails)
         default:
             return classify(
                 exitCode: exitCode,
