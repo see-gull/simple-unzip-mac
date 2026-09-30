@@ -258,6 +258,28 @@ final class AppModel: ObservableObject {
         beginExtraction(of: openArchive, selectedPaths: paths)
     }
 
+    /// Same-named items the given draft would replace on disk.
+    ///
+    /// Only the sheet's confirm step calls this, and only when the user presses
+    /// "开始解压": nothing here is scanned while the form is being edited, so a
+    /// huge archive cannot make typing in the password field slow.
+    ///
+    /// Returns an empty array when the archive is not the one the browser has
+    /// listed — without a listing there is nothing to screen against, and
+    /// pretending there are no conflicts is the only honest answer.
+    func extractionConflicts(for draft: ExtractionDraft) -> [ExtractionConflict] {
+        guard let listing,
+              draft.archive.standardizedFileURL == openArchive?.standardizedFileURL
+        else { return [] }
+        var request = ExtractionRequest(
+            archive: draft.archive,
+            destination: draft.destinationDirectory
+        )
+        request.flattenPaths = draft.flattenPaths
+        request.selectedPaths = draft.selectedPaths
+        return ExtractionConflictScanner.conflicts(listing: listing, request: request)
+    }
+
     func startExtraction(_ draft: ExtractionDraft) {
         var request = ExtractionRequest(archive: draft.archive, destination: draft.destinationDirectory)
         request.password = draft.password.isEmpty ? nil : draft.password

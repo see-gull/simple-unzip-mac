@@ -428,3 +428,253 @@ ARCHIVE_BINARY="$PWD/build/bin/7zz" \
 ```
 
 仍未自动化的交互（拖放、确认弹窗、多显示器拖动）只能人工确认，见第 6 节。
+
+## 8. 第二次用户反馈：解压同名文件不确认（已修）
+
+**报告内容**：压缩遇到同名文件会提醒并让用户选，**解压遇到同名文件却直接覆盖**。
+
+**复核结论：报告成立，而且是同一处不对称。** 代码里两条路径的差别很清楚：
+
+| | 压缩 | 解压（修复前） |
+|---|---|---|
+| 目标已存在时的默认行为 | `-aoa` 覆盖 | `-aoa` 覆盖 |
+| 界面事前检查 | `CompressSheet.existingOutput()` 检查目标文件，弹确认 | **无** |
+| 用户可选项 | 确认 / 取消 | 面板里有「覆盖 / 跳过 / 重命名」，但默认「覆盖」且从不追问 |
+
+也就是说，解压面板虽然提供了不丢文件的选择，但**默认的那一项会静默替换文件**，与压缩
+面板的处理方式不一致。README 的「数据安全」一节原文写着「解压……默认策略是覆盖。请在
+解压到已有内容的目录前确认」——把责任推给了用户，这本身就是缺陷的一部分。
+
+**修复**（`ArchiveKit/ExtractionConflicts.swift` 新增，`ExtractSheet` 接入）：
+
+1. 新增 `ExtractionConflictScanner`：拿列表和「目标文件夹」逐条比对，算出这次解压会替换
+   哪些文件。几点实现取舍：
+   - 目标文件夹不存在时直接返回空——那是绝大多数情况，也是必须保持廉价的情况；
+   - 每个**目录**只 `stat` 一次（缓存），大归档不会退化成几十万次系统调用；
+   - 悬空符号链接也算占位（`attributesOfItem` 会跟随链接、对悬空链接返回 nil，
+     用它会把访达里看得见的文件当成不存在）；
+   - 含 `..` 的条目直接跳过，检查不会跑到用户选定的文件夹之外；
+   - 平铺解压（`7zz e`）按文件名比对，且目录条目不参与。
+2. `OverwriteMode.replacesExistingFiles`：四种策略里只有「覆盖」会销毁已有文件，
+   其余三种都保留两份。这个判断放进引擎层，两处界面共用。
+3. 「开始解压」先做检查：策略会丢文件且确实发现同名项时，弹出确认框，列出总数与具体
+   条目（默认最多 6 条，其余折叠计数），并提供三个出口——**覆盖 / 跳过已存在 / 取消**。
+   选「跳过已存在」当场改策略，不必退回面板重选。
+
+**验证**：
+
+- 单元 11 项：不存在目标文件夹、已有同名文件、文件夹合并 vs 被同名文件占位、悬空链接、
+  只检查所选范围、平铺落点、`..` 越界、符号链接中间目录、重复条目去重、确认框文案
+  （含折叠计数），以及「四种策略里只有覆盖会销毁文件」这条能力表断言。
+- 集成 1 项（真实 7zz）：`解压时同名文件的处理策略真的生效`——先证明筛查能看到那个同名
+  文件，再证明 `跳过已存在` 之后本地文件**原样保留**、明确选「覆盖」后**确实被替换**。
+  只测「弹了框」是不够的：真正要保证的是用户选完之后磁盘上的结果。
+- 自检从 56 项增加到 68 项，全部通过。
+- 离屏渲染：`06-extract-sheet.png` 已重新生成，可见「解压到」一栏新增的目标文件夹说明。
+- 同一份 `AppModel` 查询在**打包后的应用**里跑过一次真实数据：
+
+```
+[preview] 解压同名冲突探测：5 项，落点均真实存在：是
+[preview]   · preview-demo/说明.md
+[preview]   · preview-demo/项目文档/README.txt
+[preview]   · preview-demo/项目文档/源码/main.swift
+[preview] 全新目标文件夹的冲突数（应为 0）：0
+```
+
+**仍未验证的部分（照实记录）**：确认框本身是 SwiftUI `.alert`，仍属于第 6 节所说的
+「未自动化的交互」。它与压缩面板的确认框是同一写法（同一位置、同一绑定方式），
+而压缩那个弹窗是人工实测确认过能弹出的；本次改动没有引入新的弹出机制。
+
+## 9. 第三次用户反馈：LGPL 附件没打进包里（已修）
+
+**报告内容**：封装应用时没有把 LGPL 附件一起封装进去。
+
+**复核结论：报告成立，而且比报告的还要多一处。** 仓库里一直躺着
+`licenses/LGPL-2.1.txt`（27 KB 的 GNU LGPL 2.1 全文），但：
+
+| 位置 | 修复前 | 说明 |
+| --- | --- | --- |
+| `licenses/LGPL-2.1.txt` | 有 | 随仓库提交 |
+| `scripts/build-app.sh` | **只复制 7-Zip-License.txt 与 unRarLicense.txt** | LGPL 全文从未被复制 |
+| `dist/Simple Unzip.app/Contents/Resources/` | **没有 LGPL-2.1.txt** | 交付物确实缺附件 |
+| `dist/Simple Unzip.zip`（发布用） | **没有 LGPL-2.1.txt** | 用户下载到的包里也没有 |
+| `release-for-github/`（发布附件目录） | **没有 LGPL-2.1.txt** | 发布页附件同样缺 |
+| 应用包内 `Simple-Unzip-LICENSE.txt`（MIT） | **没有** | 同一类遗漏：MIT 也要求随二进制附许可 |
+
+而 7-Zip 的 `License.txt` 自己写着 “You should have received a copy of the GNU Lesser
+General Public License along with this library”。也就是说：**文档里写着「许可文本会随应用
+打包」，实际没有做**。README 那句声明本身成了不实陈述。
+
+**修复**：
+
+1. `scripts/build-app.sh` 新增 `ship_license()`：四个许可文件逐个复制，**任一缺失即
+   中止构建**（不再有「静默少一个文件」的可能）；复制后统一 `chmod 644`，避免随仓库
+   带出的 0600 权限让用户打不开许可文本。
+2. 新增第 5 步「校验应用包」：在**签名之前**逐个检查 `SimpleUnzip`、`7zz`、
+   `AppIcon.icns` 与 5 个许可/声明文件，缺一个就不签名、不交付。
+3. `NOTICE.txt` 的「随本应用分发的许可文本」补上 `LGPL-2.1.txt` 与
+   `Simple-Unzip-LICENSE.txt`，并写明 LGPL 全文即在包内。
+4. 新增 `scripts/package-release.sh`：生成发布用 `dist/Simple Unzip.zip`，校验应用包与
+   **压缩包内**都含有这些条目，并整理出两处——`upload-<版本>/`（发布新版本要上传的全部
+   附件：应用 zip、`7zz`、4 份许可原文、源码包，附 `SHA256SUMS` 与上传清单）与
+   `LGPL-2.1.txt`（单独一个文件，给已发布的旧版本补挂）。
+   之前 zip 是手工打的，包内的应用更新了、zip 却没重打，正是这类漂移的温床。
+5. 新增 `scripts/fetch-licenses.sh`：许可原文一律**从官网现下**——LGPL 全文取自
+   <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt>，两个 7-Zip 文件取自官方源码包
+   `7z2603-src.tar.xz`（其自身哈希与官方登记值比对）。脚本里登记了四个哈希，不匹配即失败，
+   方便使用者脱离本仓库自行下载核对。
+
+**验证（变异测试，证明这两道检查真的有牙齿）**：
+
+```
+# 把应用包里的 LGPL 全文拿掉，打包脚本拒绝出包
+$ ./scripts/package-release.sh
+应用包缺少 Resources/LGPL-2.1.txt，先补齐再打包。
+退出码=1
+
+# 把 licenses/LGPL-2.1.txt 拿掉，构建脚本拒绝组装
+$ ./scripts/build-app.sh --skip-engine
+==> 4/6 组装 .app
+缺少许可文本：LGPL-2.1.txt（找过：…/licenses/LGPL-2.1.txt）
+许可文本必须随应用一起分发，构建中止。
+退出码=1
+```
+
+恢复文件后重跑，构建第 5 步与打包脚本都逐个打勾，并核对交付物：
+
+```
+$ ls "dist/Simple Unzip.app/Contents/Resources/"
+7-Zip-License.txt  LGPL-2.1.txt  NOTICE.txt  Simple-Unzip-LICENSE.txt
+7zz  AppIcon.icns  unRarLicense.txt
+
+$ unzip -l "dist/Simple Unzip.zip" | grep -E "LGPL|LICENSE"
+   27032  Simple Unzip.app/Contents/Resources/LGPL-2.1.txt
+    2995  Simple Unzip.app/Contents/Resources/Simple-Unzip-LICENSE.txt
+    6341  Simple Unzip.app/Contents/Resources/7-Zip-License.txt
+    1921  Simple Unzip.app/Contents/Resources/unRarLicense.txt
+    2087  Simple Unzip.app/Contents/Resources/NOTICE.txt
+
+$ codesign --verify --deep --strict "dist/Simple Unzip.app"   # 附件已被签名封存
+签名校验通过
+```
+
+**这次事故的性质**：不是代码 bug，是**交付流程缺少校验**——所有构建都报「成功」，
+缺的那个文件恰好是法律上要求必须在场的那一个。因此修复的重点不是「补一个文件」，
+而是让缺失无法通过：构建、打包、发布附件三处都有检查，且检查本身用变异测试验证过。
+
+**接着补上的第二层：内容也要是真的。** 「文件在场」不等于「文件是对的」——本次核对
+发现随仓库的 `licenses/LGPL-2.1.txt` 其实是 FSF **早期编辑版**（CRLF 换行、通讯地址还是
+51 Franklin Street、示例署名还是 Ty Coon），与 FSF 现在发布的原文不一致。逐项核对结果：
+
+| 文件 | 核对基准 | 结果 |
+| --- | --- | --- |
+| `7-Zip-License.txt` | 官方源码包 `7z2603-src.tar.xz` 内 `DOC/License.txt` | 逐字节一致 |
+| `unRarLicense.txt` | 官方源码包内 `DOC/unRarLicense.txt` | 逐字节一致 |
+| `LGPL-2.1.txt` | <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt> | **不一致 → 已换成官方原文** |
+
+两个 7-Zip 文件的哈希用随包源码（其自身哈希与官方登记值一致）比对得出，等于间接验证到
+上游；LGPL 全文则直接用 FSF 发布的文本替换。三个文件的 SHA-256 写入
+`licenses/SHA256SUMS`，构建脚本在复制前用 `shasum -c` 校验，**改一个字节就构建失败**
+（变异测试：在文件末尾追加一个换行，构建在第 4 步中止，退出码 1）。
+
+```
+$ (cd licenses && shasum -a 256 -c SHA256SUMS)
+7-Zip-License.txt: OK
+LGPL-2.1.txt: OK
+unRarLicense.txt: OK
+
+$ printf '\n' >> licenses/LGPL-2.1.txt && ./scripts/build-app.sh --skip-engine
+许可文本校验失败，以下文件与登记的原文不一致：
+LGPL-2.1.txt: FAILED
+shasum: WARNING: 1 computed checksum did NOT match
+应用包必须随附未经改动的许可原文，构建中止。
+退出码=1
+```
+
+**这里仍然存在的边界**：`SHA256SUMS` 里的哈希是本次核对时登记的，它保证「此后没被改动」，
+不保证「登记那一刻的判断一定正确」——后者靠的是上面那张表里逐字节 diff 的过程。
+
+## 10. 1.0.2 发布准备
+
+版本号只在 `scripts/build-app.sh` 的 `VERSION` 里改一处，`Info.plist` 的
+`CFBundleShortVersionString` / `CFBundleVersion` 由它生成，避免手改 plist 与文案脱节。
+
+核对方式不是看构建日志，而是直接读**交付物内部**的版本号：
+
+```
+$ /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+    "dist/Simple Unzip.app/Contents/Info.plist"
+1.0.2
+$ ditto -x -k "dist/Simple Unzip.zip" /tmp/zipcheck      # 解开要发布的那个 zip
+$ /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+    "/tmp/zipcheck/Simple Unzip.app/Contents/Info.plist"
+1.0.2
+```
+
+发布文件（`release-for-github/`，该目录按 `.gitignore` 不入库）：
+
+| 位置 | 内容 |
+| --- | --- |
+| `release-for-github/upload-1.0.2/` | 发布新版本要上传的全部附件：应用 zip、`7zz`、4 份许可原文、源码包，另附 `SHA256SUMS` 与上传清单 |
+| `release-for-github/LGPL-2.1.txt` | **单独一个文件**，给已发布的旧版本补挂用 |
+
+`7zz` 是单独放进去的：它直接从应用包内复制，复制后立即比对哈希，必须与应用内那份是
+同一个二进制（同时与 `build/bin/7zz` 一致，`671b9c80…`）：
+
+```
+$ shasum -a 256 release-for-github/upload-1.0.2/7zz \
+               "dist/Simple Unzip.app/Contents/Resources/7zz" build/bin/7zz
+671b9c80b150a24c…  release-for-github/upload-1.0.2/7zz
+671b9c80b150a24c…  dist/Simple Unzip.app/Contents/Resources/7zz
+671b9c80b150a24c…  build/bin/7zz
+$ ./release-for-github/upload-1.0.2/7zz | sed -n 2p
+7-Zip (z) 26.03 (arm64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-09-03
+```
+
+许可原文的哈希（与 `scripts/fetch-licenses.sh` 里登记的期望值一致）：
+
+| 附件 | 出处 | SHA-256（前 16 位） |
+| --- | --- | --- |
+| `7zz` | 官方源码编译，与应用包内的同一二进制 | `671b9c80b150a24c` |
+| `7z2603-src.tar.xz` | 7-zip.org 官方源码包 | `9cbde5099c6deb73` |
+| `7-Zip-License.txt` | 官方源码包内 `DOC/License.txt` | `9ac2b4a97ab5d523` |
+| `LGPL-2.1.txt` | gnu.org 官方原文 | `20e50fe7aae3e563` |
+| `unRarLicense.txt` | 官方源码包内 `DOC/unRarLicense.txt` | `17bd9fa4399092c7` |
+| `Simple-Unzip-LICENSE.txt` | 本仓库 `LICENSE` | `8e99df5fe62be810` |
+
+`Simple Unzip.zip` 每次打包都会重新生成（内嵌时间戳），哈希因此每次都变，不在这里写死；
+以上传目录里的 `SHA256SUMS` 为准：
+
+```
+$ cd release-for-github/upload-1.0.2 && shasum -a 256 -c SHA256SUMS
+Simple Unzip.zip: OK
+7zz: OK
+7z2603-src.tar.xz: OK
+7-Zip-License.txt: OK
+LGPL-2.1.txt: OK
+Simple-Unzip-LICENSE.txt: OK
+unRarLicense.txt: OK
+```
+
+`7z2603-src.tar.xz` 的完整哈希与 README 里登记的官方源码哈希一致
+（`9cbde509…c16c0d4`），即随包的是未经改动的官方源码。`LGPL-2.1.txt` 的完整哈希
+`20e50fe7…555d95` 与 FSF 发布的原文一致，且已确认它同时出现在六处——官网下载、
+仓库、应用包、发布 zip 内、上传目录，以及补挂用的那个文件：
+
+```
+20e50fe7aae3e563  build/license-download/LGPL-2.1.txt   ← fetch-licenses.sh 从官网下载
+20e50fe7aae3e563  licenses/LGPL-2.1.txt
+20e50fe7aae3e563  dist/Simple Unzip.app/Contents/Resources/LGPL-2.1.txt
+20e50fe7aae3e563  <从 dist/Simple Unzip.zip 解开的同名文件>
+20e50fe7aae3e563  release-for-github/upload-1.0.2/LGPL-2.1.txt
+20e50fe7aae3e563  release-for-github/LGPL-2.1.txt          ← 给旧版本补挂的那一个文件
+```
+
+版本历史与「新增了什么、修了哪些 bug」写在仓库根的 `CHANGELOG.md`；GitHub 发布页
+正文用 `release-for-github/RELEASE-NOTES.md`（`RELEASE-BODY.md` 已改为指向它，
+不再维护两份重复文案）。
+
+**尚未做的（发布动作本身）**：commit、打 tag、在 GitHub 建 Release、上传附件。
+这些都还没做，仓库工作区当前仍是未提交状态。
+
+

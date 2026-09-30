@@ -111,6 +111,52 @@ func registerIntegrationSuite() {
         expectFalse(manager.fileExists(atPath: extractDir.appendingPathComponent("src/drop.txt").path))
     }
 
+    harness.test("解压时同名文件的处理策略真的生效") {
+        let engine = try makeEngine()
+        let scratch = try TempSpace.make("overwrite-strategy")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let source = scratch.appendingPathComponent("payload")
+        try TempSpace.write("a.txt", in: source, contents: "来自压缩包")
+
+        let archive = scratch.appendingPathComponent("same.7z")
+        var request = CompressionRequest(sources: [source], destination: archive)
+        request.level = 1
+        try await engine.compress(request)
+
+        let listing = try await engine.list(archive: archive)
+        let destination = scratch.appendingPathComponent("out", isDirectory: true)
+        try TempSpace.write("payload/a.txt", in: destination, contents: "本地原文件")
+        let extractedFile = destination.appendingPathComponent("payload/a.txt")
+
+        // The confirmation the UI now shows depends on this scan finding the
+        // same-named file *before* 7-Zip gets to touch it.
+        let screened = ExtractionConflictScanner.conflicts(
+            listing: listing,
+            request: ExtractionRequest(archive: archive, destination: destination)
+        )
+        expectEqual(screened.count, 1, "开始解压前应先看到这个同名文件")
+        expectEqual(screened.first?.entryPath, "payload/a.txt")
+
+        var skip = ExtractionRequest(archive: archive, destination: destination)
+        skip.overwrite = .skip
+        try await engine.extract(skip)
+        expectEqual(
+            TempSpace.read(extractedFile),
+            "本地原文件",
+            "选择「跳过已存在」后本地文件必须原样保留"
+        )
+
+        var overwrite = ExtractionRequest(archive: archive, destination: destination)
+        overwrite.overwrite = .overwrite
+        try await engine.extract(overwrite)
+        expectEqual(
+            TempSpace.read(extractedFile),
+            "来自压缩包",
+            "明确选择「覆盖」后应换成压缩包里的内容"
+        )
+    }
+
     harness.test("错误密码被识别为密码错误") {
         let engine = try makeEngine()
         let scratch = try TempSpace.make("wrongpassword")

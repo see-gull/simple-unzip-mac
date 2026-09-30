@@ -5,6 +5,10 @@ struct ExtractSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var draft: ExtractionDraft
+    /// The same-named items found the moment "开始解压" was pressed. Only ever
+    /// filled for the destructive strategy; see `beginExtraction()`.
+    @State private var pendingConflicts: [ExtractionConflict] = []
+    @State private var isConfirmingOverwrite = false
 
     init(initial: ExtractionDraft) {
         _draft = State(initialValue: initial)
@@ -20,6 +24,22 @@ struct ExtractSheet: View {
         }
         // Tall enough that the password field is visible without scrolling.
         .frame(width: 560, height: 580)
+        .alert("目标位置已有同名文件", isPresented: $isConfirmingOverwrite) {
+            Button("覆盖", role: .destructive) {
+                model.startExtraction(draft)
+                dismiss()
+            }
+            Button("跳过已存在") {
+                // The user asked to be asked; let the answer be the safe one
+                // without sending them back to the picker.
+                draft.overwrite = .skip
+                model.startExtraction(draft)
+                dismiss()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(ExtractionConflictScanner.warningMessage(for: pendingConflicts))
+        }
     }
 
     private var header: some View {
@@ -88,6 +108,9 @@ struct ExtractSheet: View {
                             .controlSize(.small)
                     }
                 }
+                Text(destinationNote)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 Toggle("不保留目录结构（把所有文件平铺到目标文件夹）", isOn: $draft.flattenPaths)
             }
 
@@ -117,14 +140,44 @@ struct ExtractSheet: View {
             Spacer()
             Button("取消") { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            Button("开始解压") {
-                model.startExtraction(draft)
-                dismiss()
-            }
-            .keyboardShortcut(.defaultAction)
+            Button("开始解压") { beginExtraction() }
+                .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
+    }
+
+    // MARK: - Overwrite guard
+
+    /// Starts the extraction, asking first when the chosen strategy would
+    /// replace existing files.
+    ///
+    /// 7-Zip's `-aoa` silently overwrites, and extraction used to inherit that
+    /// without a word while compression confirmed its overwrite — the exact
+    /// same data loss, one panel apart. The other strategies (`跳过`,
+    /// `重命名…`) lose nothing, so interrupting for them would be noise.
+    private func beginExtraction() {
+        let conflicts = model.extractionConflicts(for: draft)
+        if draft.overwrite.replacesExistingFiles, !conflicts.isEmpty {
+            pendingConflicts = conflicts
+            isConfirmingOverwrite = true
+            return
+        }
+        model.startExtraction(draft)
+        dismiss()
+    }
+
+    /// A one-`stat` note about the destination folder: the real conflict check
+    /// runs on "开始解压", so nothing here walks the archive.
+    private var destinationNote: String {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(
+            atPath: draft.destinationDirectory.path,
+            isDirectory: &isDirectory
+        )
+        if !exists { return "该文件夹尚不存在，解压时会新建。" }
+        if !isDirectory.boolValue { return "该位置已是一个文件，请改用其他文件夹。" }
+        return "该文件夹已存在，开始解压前会检查其中的同名项目。"
     }
 
     private func chooseDestination() {

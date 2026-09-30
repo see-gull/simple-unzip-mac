@@ -46,7 +46,7 @@ SWIFT_FLAGS=(--disable-sandbox --scratch-path "$BUILD_DIR/app-build" --cache-pat
 step() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
 
 # --------------------------------------------------------------------------
-step "1/5 检查 7-Zip 引擎"
+step "1/6 检查 7-Zip 引擎"
 if [[ "$SKIP_ENGINE" -eq 0 ]]; then
   if [[ ! -x "$ENGINE_BIN" ]]; then
     if [[ ! -d "$SOURCE_DIR" ]]; then
@@ -70,14 +70,14 @@ echo "引擎：$ENGINE_BIN"
 "$ENGINE_BIN" | sed -n '2p'
 
 # --------------------------------------------------------------------------
-step "2/5 编译 Swift 包（release）"
+step "2/6 编译 Swift 包（release）"
 cd "$ROOT/app"
 swift build -c release --product SimpleUnzip "${SWIFT_FLAGS[@]}"
 BINARY="$BUILD_DIR/app-build/release/SimpleUnzip"
 [[ -x "$BINARY" ]] || { echo "未找到可执行文件：$BINARY" >&2; exit 1; }
 
 # --------------------------------------------------------------------------
-step "3/5 生成图标"
+step "3/6 生成图标"
 ICON_WORK="$BUILD_DIR/icon"
 rm -rf "$ICON_WORK"
 mkdir -p "$ICON_WORK/AppIcon.iconset"
@@ -93,7 +93,7 @@ done
 iconutil -c icns "$ICON_WORK/AppIcon.iconset" -o "$ICON_WORK/AppIcon.icns"
 
 # --------------------------------------------------------------------------
-step "4/5 组装 .app"
+step "4/6 组装 .app"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 
@@ -102,28 +102,46 @@ cp "$ENGINE_BIN" "$APP_BUNDLE/Contents/Resources/7zz"
 chmod +x "$APP_BUNDLE/Contents/MacOS/SimpleUnzip" "$APP_BUNDLE/Contents/Resources/7zz"
 cp "$ICON_WORK/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
-# Ship the licences that cover the bundled 7-Zip code. Prefer the copies
-# committed under licenses/ so the app builds identically from a clean clone;
-# fall back to the freshly downloaded source tree.
-if [[ -f "$ROOT/licenses/7-Zip-License.txt" ]]; then
-  cp "$ROOT/licenses/7-Zip-License.txt" "$APP_BUNDLE/Contents/Resources/7-Zip-License.txt"
-elif [[ -f "$SOURCE_DIR/DOC/License.txt" ]]; then
-  cp "$SOURCE_DIR/DOC/License.txt" "$APP_BUNDLE/Contents/Resources/7-Zip-License.txt"
-fi
-if [[ -f "$ROOT/licenses/unRarLicense.txt" ]]; then
-  cp "$ROOT/licenses/unRarLicense.txt" "$APP_BUNDLE/Contents/Resources/unRarLicense.txt"
-elif [[ -f "$SOURCE_DIR/DOC/unRarLicense.txt" ]]; then
-  cp "$SOURCE_DIR/DOC/unRarLicense.txt" "$APP_BUNDLE/Contents/Resources/unRarLicense.txt"
-fi
-# LGPL 2.1 requires the full licence text to accompany any binary distribution.
-# 7-Zip's own License.txt only points at the LGPL, so ship the full text too.
-# No fallback here: it is a build error to produce a bundle without it.
-if [[ -f "$ROOT/licenses/LGPL-2.1.txt" ]]; then
-  cp "$ROOT/licenses/LGPL-2.1.txt" "$APP_BUNDLE/Contents/Resources/LGPL-2.1.txt"
-else
-  echo "错误：缺少 licenses/LGPL-2.1.txt，拒绝产出不合规的 .app" >&2
+# Ship every licence that covers what is inside the bundle. These are not
+# decoration: the LGPL requires a copy of the licence to travel with the
+# binary, and this app's own MIT licence has the same rule for its own code.
+# A missing file used to pass silently — the LGPL text was committed to
+# licenses/ and then simply never copied in — so each file is copied
+# explicitly, and step 5 checks the result.
+ship_license() {
+  local name="$1"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    if [[ -f "$candidate" ]]; then
+      cp "$candidate" "$APP_BUNDLE/Contents/Resources/$name"
+      # The repo keeps these files at 0600; a licence the user is meant to read
+      # should not arrive unreadable for anyone else on the machine.
+      chmod 644 "$APP_BUNDLE/Contents/Resources/$name"
+      return 0
+    fi
+  done
+  echo "缺少许可文本：$name（找过：$*）" >&2
+  echo "许可文本必须随应用一起分发，构建中止。" >&2
+  exit 1
+}
+
+# Present is not the same as genuine. The two 7-Zip files are byte-identical to
+# the copies inside the official source tarball, and LGPL-2.1.txt is
+# byte-identical to the text FSF publishes (the older FSF editorial revision —
+# 51 Franklin Street, "Ty Coon" — used to sit here instead). Recording the
+# hashes makes a silent edit fail the build rather than ship as "the licence".
+if ! (cd "$ROOT/licenses" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1); then
+  echo "许可文本校验失败，以下文件与登记的原文不一致：" >&2
+  (cd "$ROOT/licenses" && shasum -a 256 -c SHA256SUMS) >&2 || true
+  echo "应用包必须随附未经改动的许可原文，构建中止。" >&2
   exit 1
 fi
+
+ship_license "7-Zip-License.txt" "$ROOT/licenses/7-Zip-License.txt" "$SOURCE_DIR/DOC/License.txt"
+ship_license "unRarLicense.txt" "$ROOT/licenses/unRarLicense.txt" "$SOURCE_DIR/DOC/unRarLicense.txt"
+ship_license "LGPL-2.1.txt" "$ROOT/licenses/LGPL-2.1.txt"
+ship_license "Simple-Unzip-LICENSE.txt" "$ROOT/LICENSE"
 # Third-party notice. This file is what satisfies the source-availability
 # obligation when the app is distributed on its own: 7-Zip ships as an
 # unmodified separate executable, so naming the exact version, the official
@@ -144,13 +162,15 @@ Simple Unzip — 第三方组件声明
   SHA-256    9cbde5099c6deb73691b0579063da5827522ccbbcba3f0020fd04e8c8c16c0d4
 
   如需上述源码，请通过本应用的发布页面提出，作者将予以提供。
-  该提供承诺自本版本发布之日起三年内有效。
 
 随本应用分发的许可文本：
 
-  7-Zip-License.txt   7-Zip 各组件的许可说明
-  unRarLicense.txt    unRAR 代码许可
-  LGPL-2.1.txt        GNU LGPL 2.1 全文（7-Zip 主体适用）
+  Simple-Unzip-LICENSE.txt  本应用自身代码（界面与封装层）的 MIT 许可
+  7-Zip-License.txt         7-Zip 各组件的许可说明
+  LGPL-2.1.txt              GNU LGPL 2.1 全文，7-Zip 引擎适用
+  unRarLicense.txt          unRAR 代码许可
+
+LGPL 要求分发二进制时随附许可全文，上述 LGPL-2.1.txt 即为该全文。
 
 
 关于 RAR 代码的强制声明
@@ -240,7 +260,34 @@ PLIST
 plutil -lint "$APP_BUNDLE/Contents/Info.plist" >/dev/null
 
 # --------------------------------------------------------------------------
-step "5/5 临时签名"
+step "5/6 校验应用包"
+# Runs before signing on purpose: a file added afterwards would invalidate the
+# seal. This is the check that would have caught the LGPL text being left
+# behind in licenses/ while every build reported success.
+MISSING=0
+for required in \
+  "Contents/MacOS/SimpleUnzip" \
+  "Contents/Resources/7zz" \
+  "Contents/Resources/AppIcon.icns" \
+  "Contents/Resources/NOTICE.txt" \
+  "Contents/Resources/7-Zip-License.txt" \
+  "Contents/Resources/LGPL-2.1.txt" \
+  "Contents/Resources/unRarLicense.txt" \
+  "Contents/Resources/Simple-Unzip-LICENSE.txt"; do
+  if [[ -s "$APP_BUNDLE/$required" ]]; then
+    printf '  ✓ %s\n' "${required#Contents/}"
+  else
+    printf '  ✗ 缺少 %s\n' "${required#Contents/}" >&2
+    MISSING=1
+  fi
+done
+if [[ "$MISSING" -ne 0 ]]; then
+  echo "应用包不完整，未签名也未交付。请补齐上面的文件后重跑。" >&2
+  exit 1
+fi
+
+# --------------------------------------------------------------------------
+step "6/6 临时签名"
 codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1 \
   && echo "已使用 ad-hoc 签名" \
   || echo "ad-hoc 签名被跳过（不影响本机使用）"

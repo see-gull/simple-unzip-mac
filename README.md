@@ -12,6 +12,9 @@ macOS 平台上的图形化解压缩工具。界面使用 SwiftUI 编写；压�
 到 [Releases](https://github.com/see-gull/simple-unzip-mac/releases) 页面下载最新的
 `Simple Unzip.zip`，解压后把 `Simple Unzip.app` 拖进「应用程序」文件夹即可。
 
+当前版本 **1.0.2**。每个版本新增了什么功能、修了哪些 bug，见
+[`CHANGELOG.md`](CHANGELOG.md)。
+
 > **首次打开被系统拦住？** 本应用未做代码签名与公证，macOS 会提示「无法验证开发者」。
 > 在「应用程序」里右键点击 → 选择「打开」→ 在弹窗里再点一次「打开」，之后即可正常双击启动。
 
@@ -106,17 +109,21 @@ macOS 平台上的图形化解压缩工具。界面使用 SwiftUI 编写；压�
 │       └── ExhaustiveTest/     格式 × 级别 × 密码的穷举测试
 ├── scripts/
 │   ├── fetch-source.sh         下载并校验官方 7-Zip 源码
-│   ├── build-app.sh            编译引擎 → 编译界面 → 组装 .app
+│   ├── fetch-licenses.sh       从官网下载许可原文并校验哈希
+│   ├── build-app.sh            编译引擎 → 编译界面 → 组装 .app → 校验许可附件
+│   ├── package-release.sh      打包发布 zip，整理「上传件 / 补挂件」两个目录
 │   ├── make-icon.swift         生成应用图标
 │   └── diagnostics/            排查用的窗口枚举工具
 ├── licenses/                   第三方组件的许可文本
 │   ├── 7-Zip-License.txt       7-Zip 源码的分发与使用许可
-│   ├── LGPL-2.1.txt            GNU LGPL 2.1 全文
-│   └── unRarLicense.txt        unRAR 代码许可
+│   ├── LGPL-2.1.txt            GNU LGPL 2.1 全文（FSF 官方原文）
+│   ├── unRarLicense.txt        unRAR 代码许可
+│   └── SHA256SUMS              上面三份原文的哈希，构建前校验
 ├── docs/
 │   ├── verification.md         验证记录：证据、弯路与未验证项
 │   ├── selftest-output.txt     自检完整输出
 │   └── previews/               界面截图
+├── CHANGELOG.md                各版本新增功能与修复的 bug
 └── README.md
 ```
 
@@ -159,9 +166,24 @@ open "dist/Simple Unzip.app"
 > 可执行权限可能在传输中丢失，运行脚本会报 `Permission denied`。执行一次
 > `chmod +x scripts/*.sh` 即可；`git clone` 与 `git archive` 都会保留该权限。
 
-如需分发现成二进制，建议将 `dist/Simple Unzip.app` 压缩后发布到 GitHub Releases，
-而不是提交进仓库。**但请注意：一旦分发二进制，就触发 LGPL「提供对应源码」的义务**，
-详见「许可证」一节的说明。
+如需分发现成二进制，用打包脚本生成 `dist/Simple Unzip.zip`，发布到 GitHub Releases，
+而不是把 `.app` 提交进仓库：
+
+```bash
+./scripts/fetch-licenses.sh    # 从官网下载许可原文并校验（首次或想复核时跑）
+./scripts/build-app.sh         # 构建，产出 dist/Simple Unzip.app（内含 7zz 与许可原文）
+./scripts/package-release.sh   # 打 zip，并整理出：
+                               #   release-for-github/upload-<版本>/  发布要上传的全部附件
+                               #     应用 zip + 7zz + 4 份许可原文 + 源码 + SHA256SUMS
+                               #   release-for-github/LGPL-2.1.txt    给已发布旧版本补挂的那一个文件
+```
+
+**请注意：一旦分发二进制，就触发 LGPL「随附许可全文」与「提供对应源码」两项义务**，
+详见「许可证」一节。三道校验都会拦漏：`fetch-licenses.sh` 校验下载到的原文哈希，
+`build-app.sh` 第 5 步逐个检查应用包内的 `LGPL-2.1.txt`、`7-Zip-License.txt`、
+`unRarLicense.txt`、`Simple-Unzip-LICENSE.txt`、`NOTICE.txt`，`package-release.sh`
+再检查一遍压缩包里的条目，并在上传目录里生成 `SHA256SUMS` 供自行核对。
+缺任何一个、或原文被改动一个字节，都直接失败、不产出交付物。
 
 ## 测试
 
@@ -181,8 +203,9 @@ swift run --disable-sandbox --scratch-path ../build/app-build SelfTest
 （`ARCHIVE_TEST_BINARY` 是显式要求，不会被当成「跳过」而伪装成通过）。
 退出码为 0 才算通过，可直接接 CI。
 
-当前结果：**通过 56 ｜ 失败 0 ｜ 跳过 0**。覆盖范围包括输出解析、进度解析、真实压缩包往返、
-三种压缩型 tar、加密与错误密码处理、头部加密（`-mhe=on`）、任务取消、中文与空格路径，
+当前结果：**通过 68 ｜ 失败 0 ｜ 跳过 0**。覆盖范围包括输出解析、进度解析、真实压缩包往返、
+三种压缩型 tar、加密与错误密码处理、头部加密（`-mhe=on`）、任务取消、中文与空格路径、
+解压同名文件的冲突筛查与「跳过 / 覆盖」两种策略的实际落盘结果，
 以及「互为前缀的兄弟目录」和「退出码 1 警告」这两个曾经的静默丢文件回归项。
 
 也可对指定的真实文件执行一次完整的列表与解压往返：
@@ -225,8 +248,8 @@ ARCHIVE_EXTRA_ARCHIVE="/绝对路径/某文件.tar.xz" swift run … SelfTest
 
 **关于数据安全，特别提醒：**
 
-- 解压遇到同名文件时会按你选择的策略处理，**默认策略是覆盖**。请在解压到已有内容的
-  目录前确认，或改用「跳过已存在」/「重命名」。
+- 解压遇到同名文件时**会先弹出确认**，并列出将被替换的条目，可在确认框里直接改选
+  「跳过已存在」；也可以在面板里预先选择「跳过已存在」/「重命名」，这两种策略不丢文件。
 - 压缩操作会覆盖同名的已有压缩包，**界面会先弹出确认**（分卷压缩检查第一部分）。
 - 压缩过程中若 7-Zip 跳过了某些条目（例如没有读取权限的文件），任务会以
   **「有警告」**结束并列出被跳过的项目，而不是显示绿色的「已完成」。
@@ -243,7 +266,32 @@ ARCHIVE_EXTRA_ARCHIVE="/绝对路径/某文件.tar.xz" swift run … SelfTest
 
 - **7-Zip 引擎**：来自 Igor Pavlov 的官方源码，适用 **GNU LGPL**（其中部分文件另用
   BSD-2/BSD-3 或 public domain，以 7-Zip 的 `License.txt` 为准）。许可文本已随仓库
-  提交到 [`licenses/`](licenses/)，也会随应用打包进 `Contents/Resources/`。
+  提交到 [`licenses/`](licenses/)。
+
+分发二进制时，许可原文随应用一起打包，位于 `Contents/Resources/`：
+
+| 包内文件 | 内容 |
+| --- | --- |
+| `Simple-Unzip-LICENSE.txt` | 本应用自身代码的 MIT 许可 |
+| `7-Zip-License.txt` | 7-Zip 各组件的许可说明（哪部分用哪个许可） |
+| `LGPL-2.1.txt` | **GNU LGPL 2.1 全文**，7-Zip 引擎适用的许可 |
+| `unRarLicense.txt` | unRAR 代码许可 |
+| `NOTICE.txt` | 第三方组件声明：引擎版本、源码地址与哈希、RAR 声明 |
+
+**LGPL 要求分发二进制时随附许可全文**，因此 `LGPL-2.1.txt` 与其余文件一样在
+`scripts/build-app.sh` 里被逐个复制，并在组装后逐个校验；缺失时构建直接失败，
+不会产出不完整的应用包。
+
+原文出处与哈希（构建前还会用 `licenses/SHA256SUMS` 校验，改一个字节即构建失败）：
+
+| 文件 | 出处 | SHA-256 |
+| --- | --- | --- |
+| `LGPL-2.1.txt` | [FSF 官方原文](https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt) | `20e50fe7…d3555d95` |
+| `7-Zip-License.txt` | 官方源码包内 `DOC/License.txt` | `9ac2b4a9…38b80fccc` |
+| `unRarLicense.txt` | 官方源码包内 `DOC/unRarLicense.txt` | `17bd9fa4…b6ccc7976` |
+
+三份哈希都逐个与上游比对过：两个 7-Zip 文件与官方源码包内的副本逐字节一致，
+`LGPL-2.1.txt` 与 FSF 发布的原文逐字节一致（此前仓库里放的是 FSF 早期编辑版）。
 
 ### 关于 RAR 代码的强制声明
 
@@ -264,33 +312,14 @@ ARCHIVE_EXTRA_ARCHIVE="/绝对路径/某文件.tar.xz" swift run … SelfTest
    读取与解压 RAR 归档——这是该许可明确允许的用途。
 3. 本软件免费提供，不对 unRAR 相关部分收取任何费用。
 
-### 关于 LGPL 与二进制分发
+### 关于分发二进制
 
-本项目自身的代码是 MIT。会触发 LGPL 的只有一件东西:应用包里那个从 7-Zip 官方源码编译出来的 `7zz`。它适用 **GNU LGPL 2.1(或更高版本,以各文件声明为准)**,其中 Rar 相关源码另带 unRAR 限制条款。
+LGPL 允许分发二进制，但要求同时提供对应的源代码。**如果你打算发布打包好的
+`.app`（例如 GitHub Releases）**，请一并满足以下任一条件：
 
-**先说清楚边界。** `7zz` 是以**未经修改的独立可执行文件**形式随包分发的,只通过命令行调用,不与应用代码链接,不构成组合作品。因此真正适用的是 **LGPL 2.1 第 4 条**(以可执行形式分发库本身),而不是第 6 条——第 6 条针对的是把库链接进作品的情形,"三年书面承诺"那套机制在本项目中并不适用,也不需要援引。
+- 附带 7-Zip 对应版本的完整源码包；或
+- 在文档中写明源码获取方式（版本号 + 官方地址 + 哈希），并提供有效的书面获取承诺。
 
-**本项目的做法。** 第 4 条要求随附完整对应源码;其第 2 段允许:目标码通过某一渠道提供访问时,以**同一渠道**提供源码的等价访问即视为满足。据此:
-
-- 每个 Release 都在**同一页面**附上 7-Zip 26.03 的完整官方源码包 `7z2603-src.tar.xz`(1,552,200 字节,哈希与官方一致);
-- 许可原文随包分发于应用内的 `Contents/Resources/`;
-- 包内 `NOTICE.txt` 记录引擎版本、官方地址与 SHA-256。
-
-源码与二进制出自同一个发布渠道,这正是第 4 条认可的方式。
-
-**如果你要复用本项目、并发布打包好的二进制**,那么这项义务由**你**承担——它跟着分发行为走,本项目无法替你履行。满足方式二选一:
-
-| 方式 | 具体做法 | 适用场景 |
-| --- | --- | --- |
-| 随附源码 | 把 `7z2603-src.tar.xz` 与你的二进制放在一起发布 | 任何分发方式,最稳妥 |
-| 同渠道提供 | 二进制与源码都放在同一个 Release 页面 / 同一个下载目录 | 通过某个"指定渠道"提供下载时 |
-
-此外,无论选哪种,下面几点都要注意:
-
-1. 在文档中声明你使用了 7-Zip,并附上 LGPL 原文;
-2. 保留 unRAR 限制条款要求的声明:**该代码不得被用于开发任何 RAR(WinRAR)兼容的压缩程序**;
-3. unRAR 限制另有规定:**未经版权人书面许可,不得就 unRAR 的分发收取费用**——不要把含 `7zz` 的产物用于收费发行。
-
-`scripts/fetch-source.sh` 已包含官方下载地址与哈希校验,可直接用于第一种方式。
-
-如果你不想承担以上任何一条,最省事的做法是**只发布源码、让使用者自行构建**:不发布二进制,就不产生分发行为,也就没有这项义务。
+仓库内的 `scripts/fetch-source.sh` 已包含下载地址与哈希校验，可作为参考。
+若不确定如何合规，**最稳妥的做法是只发布源码，让使用者自行构建**——这样不产生
+二进制分发行为。

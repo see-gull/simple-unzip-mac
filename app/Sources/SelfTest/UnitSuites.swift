@@ -409,6 +409,13 @@ func registerCommandSuite() {
         expectEqual(OverwriteMode.overwrite.switchValue, "-aoa")
         expectEqual(OverwriteMode.skip.switchValue, "-aos")
     }
+
+    harness.test("只有覆盖会销毁已有文件") {
+        expectTrue(OverwriteMode.overwrite.replacesExistingFiles)
+        expectFalse(OverwriteMode.skip.replacesExistingFiles)
+        expectFalse(OverwriteMode.renameExisting.replacesExistingFiles)
+        expectFalse(OverwriteMode.renameNew.replacesExistingFiles)
+    }
 }
 
 func registerCancellationSuite() {
@@ -436,5 +443,274 @@ func registerCancellationSuite() {
         handle.detach()
         handle.cancel()
         expectFalse(fired)
+    }
+}
+
+/// Builds a listing by hand so conflict checks can be exercised without 7-Zip.
+func makeTestListing(_ paths: [String], directories: Set<String> = []) -> ArchiveListing {
+    let entries = paths.map { path -> ArchiveEntry in
+        let isDirectory = directories.contains(path)
+        return ArchiveEntry(
+            path: path,
+            size: isDirectory ? 0 : 4,
+            packedSize: nil,
+            modified: nil,
+            attributes: isDirectory ? "D drwxr-xr-x" : "A -rw-r--r--",
+            crc: nil,
+            method: nil,
+            isDirectory: isDirectory,
+            isEncrypted: false
+        )
+    }
+    return ArchiveListing(entries: entries, properties: ArchiveProperties())
+}
+
+func registerExtractionConflictSuite() {
+    harness.test("目标文件夹不存在时无冲突") {
+        let scratch = try TempSpace.make("conflicts-missing")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let destination = scratch.appendingPathComponent("尚未创建", isDirectory: true)
+        let request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: destination
+        )
+        let conflicts = ExtractionConflictScanner.conflicts(
+            listing: makeTestListing(["src/a.txt"]),
+            request: request
+        )
+        expectTrue(conflicts.isEmpty, "目标文件夹不存在时不可能有同名文件")
+    }
+
+    harness.test("已有同名文件会被指出") {
+        let scratch = try TempSpace.make("conflicts-existing")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        try TempSpace.write("src/a.txt", in: scratch, contents: "旧内容")
+        let request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: scratch
+        )
+        let listed = makeTestListing(
+            ["src", "src/sub", "src/a.txt", "src/sub/c.txt"],
+            directories: ["src", "src/sub"]
+        )
+        let conflicts = ExtractionConflictScanner.conflicts(listing: listed, request: request)
+
+        expectEqual(conflicts.count, 1, "只有已存在的 src/a.txt 算冲突")
+        expectEqual(conflicts.first?.entryPath, "src/a.txt")
+        expectEqual(
+            conflicts.first?.destinationPath,
+            scratch.resolvingSymlinksInPath().appendingPathComponent("src/a.txt").path
+        )
+        expectFalse(conflicts.first?.entryIsDirectory ?? true)
+        expectFalse(conflicts.first?.existingIsDirectory ?? true)
+    }
+
+    harness.test("同名文件夹不算冲突，被文件占位才算") {
+        let scratch = try TempSpace.make("conflicts-directory")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        try FileManager.default.createDirectory(
+            at: scratch.appendingPathComponent("src/sub"),
+            withIntermediateDirectories: true
+        )
+        let request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: scratch
+        )
+        let listed = makeTestListing(
+            ["src", "src/sub"],
+            directories: ["src", "src/sub"]
+        )
+        expectTrue(
+            ExtractionConflictScanner.conflicts(listing: listed, request: request).isEmpty,
+            "解压到已有文件夹是正常合并"
+        )
+
+        // A plain file where the archive has a folder: 7-Zip cannot write into
+        // it, and the user has to hear about it before the run.
+        try FileManager.default.removeItem(at: scratch.appendingPathComponent("src/sub"))
+        try TempSpace.write("src/sub", in: scratch, contents: "占位")
+        let blocking = ExtractionConflictScanner.conflicts(listing: listed, request: request)
+        expectEqual(blocking.count, 1, "文件夹条目被同名文件占位应算冲突")
+        expectEqual(blocking.first?.entryPath, "src/sub")
+        expectTrue(blocking.first?.entryIsDirectory ?? false)
+        expectFalse(blocking.first?.existingIsDirectory ?? true)
+    }
+
+    harness.test("悬空符号链接仍算占位") {
+        let scratch = try TempSpace.make("conflicts-symlink")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        try FileManager.default.createDirectory(
+            at: scratch.appendingPathComponent("src"),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: scratch.appendingPathComponent("src/a.txt").path,
+            withDestinationPath: scratch.appendingPathComponent("src/并不存在").path
+        )
+        let request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: scratch
+        )
+        let conflicts = ExtractionConflictScanner.conflicts(
+            listing: makeTestListing(["src/a.txt"]),
+            request: request
+        )
+        expectEqual(conflicts.count, 1, "悬空链接在访达里可见，也必须算冲突")
+        expectFalse(conflicts.first?.existingIsDirectory ?? true)
+    }
+
+    harness.test("只检查所选范围") {
+        let scratch = try TempSpace.make("conflicts-selection")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        try TempSpace.write("src/a.txt", in: scratch, contents: "旧")
+        try TempSpace.write("src/sub/c.txt", in: scratch, contents: "旧")
+
+        var request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: scratch
+        )
+        let listed = makeTestListing(
+            ["src", "src/sub", "src/a.txt", "src/sub/c.txt"],
+            directories: ["src", "src/sub"]
+        )
+        request.selectedPaths = ["src/sub"]
+        let conflicts = ExtractionConflictScanner.conflicts(listing: listed, request: request)
+        expectEqual(conflicts.count, 1, "未选中的 src/a.txt 不该被报出来")
+        expectEqual(conflicts.first?.entryPath, "src/sub/c.txt")
+
+        request.selectedPaths = []
+        expectEqual(
+            ExtractionConflictScanner.conflicts(listing: listed, request: request).count,
+            2,
+            "空选择表示全部内容"
+        )
+    }
+
+    harness.test("平铺解压按文件名判断冲突") {
+        let scratch = try TempSpace.make("conflicts-flatten")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        try TempSpace.write("a.txt", in: scratch, contents: "旧")
+        var request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: scratch
+        )
+        let listed = makeTestListing(["src/a.txt"])
+
+        expectTrue(
+            ExtractionConflictScanner.conflicts(listing: listed, request: request).isEmpty,
+            "保留目录结构时落点是 src/a.txt"
+        )
+
+        request.flattenPaths = true
+        let flattened = ExtractionConflictScanner.conflicts(listing: listed, request: request)
+        expectEqual(flattened.count, 1, "平铺时落点就是 a.txt")
+        expectEqual(
+            flattened.first?.destinationPath,
+            scratch.resolvingSymlinksInPath().appendingPathComponent("a.txt").path
+        )
+    }
+
+    harness.test("条目不会把检查带出目标文件夹") {
+        let scratch = try TempSpace.make("conflicts-traversal")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        // A hostile archive path must not make the scan stat, or later write,
+        // outside the folder the user chose.
+        try TempSpace.write("evil.txt", in: scratch, contents: "别动我")
+        let destination = scratch.appendingPathComponent("目标", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: destination
+        )
+        let listed = makeTestListing(["../evil.txt", "./inner.txt", "inner.txt"])
+        let conflicts = ExtractionConflictScanner.conflicts(listing: listed, request: request)
+
+        expectTrue(conflicts.isEmpty, "越界路径与不存在的文件都不该报冲突")
+        expectNil(ExtractionConflictScanner.normalizedPath("../evil.txt"))
+        expectEqual(ExtractionConflictScanner.normalizedPath("./inner.txt"), "inner.txt")
+    }
+
+    harness.test("符号链接的中间目录按真实落点检查") {
+        let scratch = try TempSpace.make("conflicts-linked-directory")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        // A folder the user linked into the destination: 7-Zip writes through
+        // the link, so a file behind it is a real conflict, not a miss.
+        try TempSpace.write("real/a.txt", in: scratch, contents: "旧")
+        let destination = scratch.appendingPathComponent("dest", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            atPath: destination.appendingPathComponent("link").path,
+            withDestinationPath: scratch.appendingPathComponent("real").path
+        )
+
+        let request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: destination
+        )
+        let conflicts = ExtractionConflictScanner.conflicts(
+            listing: makeTestListing(["link/a.txt"]),
+            request: request
+        )
+        expectEqual(conflicts.count, 1, "链接目录后面的同名文件也要报出来")
+        expectEqual(conflicts.first?.entryPath, "link/a.txt")
+    }
+
+    harness.test("重复条目只报一次") {
+        let scratch = try TempSpace.make("conflicts-duplicates")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        try TempSpace.write("a.txt", in: scratch, contents: "旧")
+        let request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: scratch
+        )
+        let conflicts = ExtractionConflictScanner.conflicts(
+            listing: makeTestListing(["a.txt", "a.txt"]),
+            request: request
+        )
+        expectEqual(conflicts.count, 1, "同一落点只该提醒一次")
+    }
+
+    harness.test("确认框文案说明数量与落点，且不无限列长") {
+        let scratch = try TempSpace.make("conflicts-message")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        expectEqual(
+            ExtractionConflictScanner.warningMessage(for: []),
+            "",
+            "没有冲突就不该有文案"
+        )
+
+        var paths: [String] = []
+        for index in 1...9 {
+            let path = "f\(index).txt"
+            paths.append(path)
+            try TempSpace.write(path, in: scratch, contents: "旧")
+        }
+        let request = ExtractionRequest(
+            archive: scratch.appendingPathComponent("a.7z"),
+            destination: scratch
+        )
+        let conflicts = ExtractionConflictScanner.conflicts(
+            listing: makeTestListing(paths),
+            request: request
+        )
+        expectEqual(conflicts.count, 9)
+
+        let message = ExtractionConflictScanner.warningMessage(for: conflicts, limit: 6)
+        expectTrue(message.contains("9 个同名项目"), "文案要给出总数")
+        expectTrue(message.contains("f1.txt"), "文案要给出具体落点")
+        expectTrue(message.contains("另外 3 个"), "超出上限的部分要折叠计数")
+        expectFalse(message.contains("f7.txt"), "折叠后不再逐个列出")
+        expectTrue(message.contains("跳过已存在"), "文案要指出不用覆盖的选择")
     }
 }

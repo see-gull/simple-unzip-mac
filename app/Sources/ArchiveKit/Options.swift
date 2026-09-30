@@ -110,6 +110,17 @@ public enum OverwriteMode: String, CaseIterable, Identifiable, Sendable {
         case .renameNew: return "-aou"
         }
     }
+
+    /// Whether this strategy destroys what is already on disk.
+    ///
+    /// `-aoa` replaces same-named files; the other three keep both copies, so
+    /// they are the ones that need no confirmation. Both panels ask before
+    /// starting when this is true and the target already holds something —
+    /// that ask is the whole reason the strategy is a user choice rather than
+    /// a hard-coded switch.
+    public var replacesExistingFiles: Bool {
+        self == .overwrite
+    }
 }
 
 /// Parameters for creating an archive.

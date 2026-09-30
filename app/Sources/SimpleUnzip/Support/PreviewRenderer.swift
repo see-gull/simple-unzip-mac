@@ -104,6 +104,24 @@ enum PreviewRenderer {
                 size: CGSize(width: 560, height: 580),
                 to: outputDirectory.appendingPathComponent("06-extract-sheet.png")
             )
+
+            // A screenshot cannot show a confirmation dialog, so the overwrite
+            // guard is checked here instead: the same `AppModel` call the
+            // sheet makes on "开始解压", against the folder the preview archive
+            // was actually built from. Every reported path must be real — a
+            // conflict the user cannot see on disk would be a false alarm.
+            var existingDestination = extractionDraft
+            existingDestination.destinationDirectory = demoRoot.deletingLastPathComponent()
+            let conflicts = model.extractionConflicts(for: existingDestination)
+            let allReal = conflicts.allSatisfy {
+                FileManager.default.fileExists(atPath: $0.destinationPath)
+            }
+            print("[preview] 解压同名冲突探测：\(conflicts.count) 项，落点均真实存在：\(allReal ? "是" : "否")")
+            for conflict in conflicts.prefix(3) {
+                print("[preview]   · \(conflict.entryPath)")
+            }
+            print("[preview] 全新目标文件夹的冲突数（应为 0）："
+                + "\(model.extractionConflicts(for: extractionDraft).count)")
         }
 
         // The password prompt for header-encrypted archives, and the task-row
