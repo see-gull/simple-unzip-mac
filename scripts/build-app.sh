@@ -20,7 +20,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME="Simple Unzip"
 # Change this to your own reverse-DNS identifier before publishing.
 BUNDLE_ID="app.simpleunzip.mac"
-VERSION="1.0.1"
+VERSION="1.0.2"
 
 SOURCE_DIR="$ROOT/source/src"
 ENGINE_BIN="$ROOT/build/bin/7zz"
@@ -115,6 +115,15 @@ if [[ -f "$ROOT/licenses/unRarLicense.txt" ]]; then
 elif [[ -f "$SOURCE_DIR/DOC/unRarLicense.txt" ]]; then
   cp "$SOURCE_DIR/DOC/unRarLicense.txt" "$APP_BUNDLE/Contents/Resources/unRarLicense.txt"
 fi
+# LGPL 2.1 requires the full licence text to accompany any binary distribution.
+# 7-Zip's own License.txt only points at the LGPL, so ship the full text too.
+# No fallback here: it is a build error to produce a bundle without it.
+if [[ -f "$ROOT/licenses/LGPL-2.1.txt" ]]; then
+  cp "$ROOT/licenses/LGPL-2.1.txt" "$APP_BUNDLE/Contents/Resources/LGPL-2.1.txt"
+else
+  echo "错误：缺少 licenses/LGPL-2.1.txt，拒绝产出不合规的 .app" >&2
+  exit 1
+fi
 # Third-party notice. This file is what satisfies the source-availability
 # obligation when the app is distributed on its own: 7-Zip ships as an
 # unmodified separate executable, so naming the exact version, the official
@@ -135,11 +144,13 @@ Simple Unzip — 第三方组件声明
   SHA-256    9cbde5099c6deb73691b0579063da5827522ccbbcba3f0020fd04e8c8c16c0d4
 
   如需上述源码，请通过本应用的发布页面提出，作者将予以提供。
+  该提供承诺自本版本发布之日起三年内有效。
 
 随本应用分发的许可文本：
 
   7-Zip-License.txt   7-Zip 各组件的许可说明
   unRarLicense.txt    unRAR 代码许可
+  LGPL-2.1.txt        GNU LGPL 2.1 全文（7-Zip 主体适用）
 
 
 关于 RAR 代码的强制声明
